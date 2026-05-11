@@ -1,0 +1,26 @@
+{
+  "name": "ooxml-edit-infra-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=23"
+  },
+  "scripts": {
+    "dev": "PATH=/opt/homebrew/bin:$PATH tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "PATH=/opt/homebrew/bin:$PATH tsc -p tsconfig.json",
+    "typecheck": "PATH=/opt/homebrew/bin:$PATH tsc --noEmit",
+    "test": "PATH=/opt/homebrew/bin:$PATH node --test --import tsx tests/*.test.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.1.0",
+    "@fastify/multipart": "^9.3.0",
+    "fastify": "^5.6.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.25",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

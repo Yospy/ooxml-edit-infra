@@ -1,0 +1,17 @@
+{
+  "name": "ooxml-edit-infra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Infrastructure for reliable agentic Office edits: parse PPTX/DOCX/XLSX into canonical graphs, compile intent into deterministic OOXML mutations, render-validate outputs, and preserve versioned exports.",
+  "scripts": {
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:ui": "npm --prefix UI run dev",
+    "typecheck": "npm --prefix backend run typecheck && npm --prefix UI run typecheck",
+    "test": "npm --prefix backend run test",
+    "lint": "npm --prefix UI run lint",
+    "check": "npm --prefix backend run test && npm --prefix backend run typecheck && npm --prefix UI run typecheck && npm --prefix UI run lint"
+  },
+  "engines": {
+    "node": ">=23"
+  }
+}

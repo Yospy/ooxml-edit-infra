@@ -1,0 +1,284 @@
+export type UiState =
+  | "upload_empty"
+  | "uploading"
+  | "processing"
+  | "ready"
+  | "planning"
+  | "awaiting_plan_approval"
+  | "editing"
+  | "validating"
+  | "review_ready"
+  | "accepted";
+
+export type SlideStatus = "ready" | "changed" | "warning" | "failed" | "rendering";
+
+export type ValidationSummary = {
+  blockingCount: number;
+  warningCount: number;
+  canAccept: boolean;
+  canExport: boolean;
+  warnings: string[];
+};
+
+export type Slide = {
+  slideId: string;
+  number: number;
+  title: string;
+  subtitle: string;
+  status: SlideStatus;
+  thumbnailUrl?: string;
+  renderUrl?: string;
+};
+
+export type VersionNode = {
+  id: string;
+  label: string;
+  parentId: string | null;
+  status: "original" | "working" | "edited" | "accepted" | "rejected";
+};
+
+export type DeckStatus = {
+  deckId: string;
+  fileName: string;
+  activeVersionId: string;
+  parentVersionId: string | null;
+  originalVersionId: string;
+  changedSlides: string[];
+  slideStatuses: Record<string, SlideStatus>;
+  validationSummary: ValidationSummary;
+  slides: Slide[];
+  versions: VersionNode[];
+};
+
+export type EditOperation = {
+  operationId: string;
+  operationType: "replace_text" | "fit_text" | "apply_style_ref";
+  targetRef: string;
+  humanLabel: string;
+  before: string;
+  after: string;
+  preserveStyle: boolean;
+};
+
+export type EditPlan = {
+  planId: string;
+  planType: "edit" | "repair";
+  deckId: string;
+  createdFromVersionId: string;
+  status: "awaiting_approval" | "approved" | "applied" | "rejected";
+  summary: string;
+  affectedSlides: string[];
+  operations: EditOperation[];
+  risks: string[];
+  requiresApproval: true;
+};
+
+export type ReviewResult = {
+  inputVersionId: string;
+  outputVersionId: string;
+  activeVersionId: string;
+  parentVersionId: string;
+  originalVersionId: string;
+  changedSlides: string[];
+  slideStatuses: Record<string, SlideStatus>;
+  validationSummary: ValidationSummary;
+  slidePreviews: Array<{
+    slideId: string;
+    before: {
+      versionId: string;
+      title: string;
+      subtitle: string;
+      renderUrl?: string;
+    };
+    after: {
+      versionId: string;
+      title: string;
+      subtitle: string;
+      renderUrl?: string;
+    };
+  }>;
+};
+
+export type ProcessingProgress = {
+  upload: number;
+  parse: number;
+  render: number;
+  validate: number;
+};
+
+export type JobStatus<T = unknown> = {
+  jobId: string;
+  deckId?: string;
+  versionId?: string;
+  jobType:
+    | "upload_process"
+    | "parse"
+    | "render"
+    | "request_edit_plan"
+    | "apply_plan"
+    | "validate"
+    | "request_repair_plan"
+    | "export";
+  status: "queued" | "running" | "succeeded" | "failed";
+  progress: ProcessingProgress;
+  result?: T;
+  errorMessage?: string;
+};
+
+// ---- Decision primitives reused inside chip inputs ----
+
+export type DecisionOption = {
+  id: string;
+  label: string;
+  description?: string;
+};
+
+export type DecisionPurpose =
+  | "clarify_intent"
+  | "choose_target"
+  | "confirm_risk"
+  | "final_edit_review";
+
+// ---- Panel rendering model (narration + chips) ----
+
+export type ToolVerb =
+  | "resolve_target"
+  | "create_plan"
+  | "apply_plan"
+  | "render"
+  | "validate"
+  | "request_repair"
+  | "accept_version"
+  | "export";
+
+export type ToolStatus =
+  | "running"
+  | "awaiting_input"
+  | "submitting"
+  | "done"
+  | "failed";
+
+export type ToolIcon =
+  | "arrow"
+  | "edit"
+  | "gear"
+  | "image"
+  | "check"
+  | "download"
+  | "warning";
+
+export type ToolChipBody =
+  | { kind: "text_diff"; before: string; after: string; flags: string[] }
+  | {
+      kind: "validation";
+      changed: number;
+      blocking: number;
+      warnings: number;
+      warningText?: string;
+    }
+  | { kind: "render_summary"; affectedSlides: string[] }
+  | { kind: "target_resolution"; targetRef: string; confidence: number };
+
+export type ChipInput =
+  | { mode: "yes_no"; primary: DecisionOption; secondary: DecisionOption }
+  | { mode: "single_choice"; options: DecisionOption[] }
+  | { mode: "free_text"; placeholder: string };
+
+export type ChipFailure = {
+  code: string;
+  message: string;
+  recovery: DecisionOption[];
+};
+
+export type ToolChip = {
+  chipId: string;
+  verb: ToolVerb;
+  status: ToolStatus;
+  icon: ToolIcon;
+  purpose?: DecisionPurpose;
+  sourceVersionId?: string;
+  subjectVersionId?: string;
+  title: string;
+  subtitle?: string;
+  body?: ToolChipBody;
+  input?: ChipInput;
+  failure?: ChipFailure;
+  jobId?: string;
+};
+
+export type PanelItem =
+  | { kind: "prose"; itemId: string; text: string; streaming?: boolean }
+  | { kind: "user"; itemId: string; text: string }
+  | { kind: "chip"; itemId: string; chip: ToolChip };
+
+export type BannerTone = "info" | "warn";
+
+export type StateBannerModel = {
+  tone: BannerTone;
+  text: string;
+};
+
+export type AgentEvent =
+  | { type: "user_message"; itemId: string; text: string }
+  | { type: "prose_start"; itemId: string }
+  | { type: "prose_chunk"; itemId: string; delta: string }
+  | { type: "prose_end"; itemId: string }
+  | { type: "tool_start"; chip: ToolChip }
+  | { type: "tool_update"; chipId: string; patch: Partial<ToolChip> }
+  | { type: "tool_complete"; chipId: string; patch: Partial<ToolChip> }
+  | { type: "tool_failed"; chipId: string; failure: ChipFailure }
+  | { type: "decision_required"; chipId: string; input: ChipInput }
+  | {
+      type: "decision_resolved";
+      chipId: string;
+      selectedId?: string;
+      answerText?: string;
+    }
+  | { type: "banner"; tone: BannerTone; text: string };
+
+export type RequestEditInput = {
+  deckId: string;
+  versionId: string;
+  slideId: string;
+  selectedElementIds: string[];
+  message: string;
+};
+
+export type ChipResponse = {
+  chipId: string;
+  verb: ToolVerb;
+  selectedId?: string;
+  answerText?: string;
+};
+
+export type DecisionRequest = {
+  decisionId: string;
+  deckId: string;
+  versionId: string;
+  planId?: string;
+  purpose: DecisionPurpose;
+  sourceVersionId?: string;
+  subjectVersionId?: string;
+  kind:
+    | "clarification"
+    | "approval"
+    | "risk_confirmation"
+    | "repair_approval"
+    | "export_confirmation";
+  title: string;
+  question: string;
+  context?: string;
+  inputMode: "yes_no" | "single_choice" | "free_text";
+  options?: DecisionOption[];
+  defaultOptionId?: string;
+  required: true;
+  blocksWorkflow: true;
+};
+
+export type ExportArtifact = {
+  deckId: string;
+  versionId: string;
+  fileName: string;
+  downloadUrl: string;
+  status: "prepared";
+};
