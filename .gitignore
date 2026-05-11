@@ -38,6 +38,7 @@ yarn-error.log*
 # Local runtime state and generated artifacts
 /backend/data/
 /data/
+/sprints/
 *.db
 *.db-shm
 *.db-wal
