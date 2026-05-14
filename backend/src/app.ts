@@ -10,6 +10,7 @@ import { badRequest } from "./errors.js";
 import { OpenAIPlanner, type Planner } from "./planner.js";
 import { ProprietaryDataStore } from "./proprietary-data-store.js";
 import { SQLiteRepository } from "./repository.js";
+import { OpenAITargetResolver, type TargetResolver } from "./target-resolver.js";
 import type { DecisionResponse, RequestEditInput } from "./types.js";
 import { loadSamplePptx, WorkflowService } from "./workflow.js";
 
@@ -19,6 +20,7 @@ export type BuildAppOptions = {
   dataDir?: string;
   config?: Partial<AppConfig>;
   planner?: Planner;
+  targetResolver?: TargetResolver;
 };
 
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
@@ -37,6 +39,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     store,
     proprietaryDataStore,
     planner: options.planner ?? new OpenAIPlanner(config),
+    targetResolver: options.targetResolver ?? new OpenAITargetResolver(config),
   });
 
   app.register(cors, {

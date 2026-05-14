@@ -82,6 +82,7 @@ export type GraphSlide = {
   number: number;
   title: string;
   subtitle: string;
+  backgroundColor?: string;
   widthEmu: number;
   heightEmu: number;
   elements: SlideElementRecord[];
@@ -94,7 +95,7 @@ export type CanonicalGraph = {
 };
 
 export type StoredDecision = DecisionRequest & {
-  action: "apply_plan" | "accept_version";
+  action: "apply_plan" | "accept_version" | "clarify_target";
   status: "awaiting" | "answered" | "expired";
   threadId?: string;
 };

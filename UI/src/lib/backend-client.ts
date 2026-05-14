@@ -37,12 +37,12 @@ export type UploadDeckResponse = {
 };
 
 export type EditRequestResponse = {
-  uiState: "awaiting_plan_approval";
+  uiState: "awaiting_plan_approval" | "ready";
   threadId: string;
   events: AgentEvent[];
-  editPlan: unknown;
+  editPlan?: unknown;
   decisionRequest: DecisionRequest;
-  proposalPreview: ProposalPreview;
+  proposalPreview?: ProposalPreview;
 };
 
 export type DecisionResponsePayload = {
@@ -64,7 +64,6 @@ export type ApplyJobResult = {
   reviewResult: ReviewResult;
   deckStatus: DeckStatus;
   events: AgentEvent[];
-  decisionRequest: DecisionRequest;
 };
 
 export type ExportVersionResponse = {
@@ -172,6 +171,7 @@ export async function requestEdit(
         selectedSlideId: input.slideId,
         selectedSlideContext: input.selectedSlideContext,
         selectedElementIds: input.selectedElementIds,
+        visibleSlideIds: input.visibleSlideIds,
         uiMode: "ready",
         clientContext: {
           activePanel: "agent",
@@ -203,6 +203,20 @@ export async function exportVersion(
 ): Promise<ExportVersionResponse> {
   return requestJson<ExportVersionResponse>(
     `/api/decks/${deckId}/versions/${versionId}/export`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export async function restoreVersion(
+  deckId: string,
+  versionId: string,
+): Promise<{ uiState: "ready"; deckStatus: DeckStatus }> {
+  return requestJson<{ uiState: "ready"; deckStatus: DeckStatus }>(
+    `/api/decks/${deckId}/versions/${versionId}/restore`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },

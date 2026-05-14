@@ -10,6 +10,10 @@ export type PlannerInput = {
   selectedSlideId?: string;
   target: SlideElementRecord;
   slide: GraphSlide;
+  targetResolution?: {
+    confidence: number;
+    reason: string;
+  };
 };
 
 export type Planner = {
@@ -84,6 +88,7 @@ export class OpenAIPlanner implements Planner {
                 text: input.target.text,
                 bounds: input.target.bounds,
               },
+              target_resolution: input.targetResolution,
               allowed_operations: ["replace_text", "fit_text"],
               output_shape: {
                 summary: "string",
@@ -140,8 +145,21 @@ export class OpenAIPlanner implements Planner {
 }
 
 function heuristicRewrite(text: string, message: string): string {
-  const explicitQuote = /["“](.+?)["”]/.exec(message)?.[1]?.trim();
+  const quotes = [...message.matchAll(/["“](.+?)["”]/g)]
+    .map((match) => match[1]?.trim())
+    .filter((value): value is string => Boolean(value));
+  if (quotes.length > 1) return quotes[quotes.length - 1]!;
+  const explicitQuote = quotes[0];
   if (explicitQuote) return explicitQuote;
+
+  const fromTo = /\bfrom\s+(.+?)\s+to\s+(.+)$/i.exec(message)?.[2]?.trim();
+  if (fromTo) return cleanupReplacement(fromTo);
+
+  const replaceWith = /\breplace\s+.+?\s+with\s+(.+)$/i.exec(message)?.[1]?.trim();
+  if (replaceWith) return cleanupReplacement(replaceWith);
+
+  const changeTo = /\b(?:change|replace|make|set|update)\b[\s\S]*?\b(?:to|with)\s+(.+)$/i.exec(message)?.[1]?.trim();
+  if (changeTo) return cleanupReplacement(changeTo);
 
   const lower = message.toLowerCase();
   if (lower.includes("short")) {
@@ -151,6 +169,10 @@ function heuristicRewrite(text: string, message: string): string {
   }
   if (lower.includes("growth") && /revenue/i.test(text)) return text.replace(/revenue/i, "Growth");
   return text.length > 24 ? text.slice(0, 24).trim() : `${text} Updated`;
+}
+
+function cleanupReplacement(value: string): string {
+  return value.replace(/[.?!]\s*$/, "").trim();
 }
 
 function parseResponseJson(body: unknown): Record<string, unknown> {

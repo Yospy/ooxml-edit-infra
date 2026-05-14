@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ArtifactStore } from "./artifact-store.js";
 import type { AppConfig } from "./config.js";
-import { applyTextOperations } from "./edit-engine.js";
 import { badRequest, conflict, notFound } from "./errors.js";
 import { makeId } from "./ids.js";
 import { HeuristicPlanner, type Planner } from "./planner.js";
@@ -16,6 +15,7 @@ import type {
   DecisionRequest,
   DecisionResponse,
   DeckStatus,
+  EditOperation,
   EditPlan,
   ExportArtifact,
   JobStatus,
@@ -30,10 +30,25 @@ import {
   type CanonicalGraph,
   type GraphSlide,
   SQLiteRepository,
-  type SlideElementRecord,
   type StoredDecision,
 } from "./repository.js";
 import { renderGraphSlides, slideToSvg } from "./svg-renderer.js";
+import {
+  applyRegistryOperations,
+  buildOperationMenu,
+  HeuristicOperationSelector,
+  menuTargetsForClarification,
+  OpenAIOperationSelector,
+  planFromSelection,
+  previewPlanOnGraph,
+  validatePlanAgainstRegistry,
+  type OperationSelector,
+  type OperationSelection,
+} from "./operation-registry.js";
+import {
+  HeuristicTargetResolver,
+  type TargetResolver,
+} from "./target-resolver.js";
 import { validateVersion } from "./validator.js";
 
 type WorkflowOptions = {
@@ -42,6 +57,8 @@ type WorkflowOptions = {
   store: ArtifactStore;
   proprietaryDataStore: ProprietaryDataStore;
   planner?: Planner;
+  targetResolver?: TargetResolver;
+  operationSelector?: OperationSelector;
 };
 
 const completeProgress: ProcessingProgress = {
@@ -53,9 +70,17 @@ const completeProgress: ProcessingProgress = {
 
 export class WorkflowService {
   private readonly planner: Planner;
+  private readonly targetResolver: TargetResolver;
+  private readonly operationSelector: OperationSelector;
 
   constructor(private readonly options: WorkflowOptions) {
     this.planner = options.planner ?? new HeuristicPlanner();
+    this.targetResolver = options.targetResolver ?? new HeuristicTargetResolver();
+    this.operationSelector =
+      options.operationSelector ??
+      (options.config.openaiApiKey
+        ? new OpenAIOperationSelector(options.config)
+        : new HeuristicOperationSelector());
   }
 
   createUpload(fileName: string, bytes: Buffer): { deckId: string; jobId: string; uiState: "processing" } {
@@ -151,11 +176,11 @@ export class WorkflowService {
   }
 
   async requestEdit(input: RequestEditInput): Promise<{
-    uiState: "awaiting_plan_approval";
+    uiState: "awaiting_plan_approval" | "ready";
     events: AgentEvent[];
-    editPlan: EditPlan;
+    editPlan?: EditPlan;
     decisionRequest: DecisionRequest;
-    proposalPreview: ProposalPreview;
+    proposalPreview?: ProposalPreview;
     threadId: string;
   }> {
     const deck = this.getDeckStatus(input.deckId);
@@ -168,24 +193,62 @@ export class WorkflowService {
       : this.options.repo.ensureThread(input.deckId);
     this.options.repo.saveThreadMessage(threadId, "user", input.message);
 
-    const target = this.resolveTarget(input);
-    const slide = this.requireGraphSlide(input.deckId, input.versionId, target.slideId);
-    const planned = await this.planner.createPlan({
+    const graph = this.readGraph(input.deckId, input.versionId);
+    const currentSlideId = explicitSlideId(input.message, graph) ?? input.selectedSlideId ?? graph.slides[0]?.slideId;
+    if (!currentSlideId) throw conflict("TARGET_NOT_FOUND", "No slide was available for operation planning.");
+    const operationMenu = buildOperationMenu(graph, currentSlideId);
+    const selectedOperation = await this.operationSelector.selectOperation({
+      message: input.message,
+      menu: operationMenu,
+      selectedElementIds: input.selectedElementIds,
+    });
+    if (
+      selectedOperation.needsClarification ||
+      !selectedOperation.targetRef ||
+      !selectedOperation.operationType ||
+      selectedOperation.confidence < 0.75
+    ) {
+      const options = menuTargetsForClarification(operationMenu);
+      const decision = this.createDecision({
+        deckId: input.deckId,
+        versionId: input.versionId,
+        threadId,
+        action: "clarify_target",
+        purpose: "choose_target",
+        sourceVersionId: input.versionId,
+        subjectVersionId: input.versionId,
+        kind: "clarification",
+        title: "Which object should I edit?",
+        question:
+          selectedOperation.clarificationQuestion ??
+          "Which slide object should I edit?",
+        context: selectedOperation.reason,
+        inputMode: "single_choice",
+        options,
+        defaultOptionId: options[0]?.id,
+      });
+      this.options.repo.saveThreadMessage(
+        threadId,
+        "assistant",
+        "I need a specific edit target before preparing the preview.",
+      );
+      return {
+        uiState: "ready",
+        events: createClarificationEvents(input.message, decision, selectedOperation),
+        decisionRequest: stripDecision(decision),
+        threadId,
+      };
+    }
+
+    const plan = planFromSelection({
       deckId: input.deckId,
       versionId: input.versionId,
-      message: input.message,
-      selectedSlideId: input.selectedSlideId,
-      target,
-      slide,
+      selection: selectedOperation,
+      menu: operationMenu,
+      graph,
     });
-    const plan: EditPlan = {
-      ...planned,
-      planId: makeId("plan"),
-      deckId: input.deckId,
-      createdFromVersionId: input.versionId,
-      status: "awaiting_approval",
-    };
-    assertSelectedSlideScope(plan, target.slideId, input.message);
+    assertSelectedSlideScope(plan, currentSlideId, input.message);
+    validatePlanAgainstRegistry(plan, graph);
     this.options.repo.savePlan({ ...plan, threadId, userPrompt: input.message });
 
     const decision = this.createDecision({
@@ -226,7 +289,7 @@ export class WorkflowService {
 
     return {
       uiState: "awaiting_plan_approval",
-      events: createPlanEvents(input.message, target, input.versionId, plan, decision),
+      events: createPlanEvents(input.message, input.versionId, plan, decision, selectedOperation),
       editPlan: plan,
       decisionRequest: stripDecision(decision),
       proposalPreview,
@@ -249,6 +312,26 @@ export class WorkflowService {
 
     if (decision.action === "apply_plan") {
       return this.respondToApplyDecision(deck, decision, response);
+    }
+    if (decision.action === "clarify_target") {
+      this.options.repo.saveDecision({ ...decision, status: "answered" });
+      if (decision.threadId) {
+        this.options.repo.saveThreadMessage(
+          decision.threadId,
+          "user",
+          response.answerText ?? response.selectedOptionId ?? "",
+        );
+        this.options.repo.saveThreadMessage(
+          decision.threadId,
+          "assistant",
+          "Target clarified. Submit the edit instruction again to preview the change.",
+        );
+      }
+      return {
+        uiState: "ready" as const,
+        events: clarifyTargetResolvedEvents(decision.decisionId),
+        deckStatus: deck,
+      };
     }
     return this.respondToAcceptDecision(deck, decision, response);
   }
@@ -422,14 +505,15 @@ export class WorkflowService {
       reviewResult: ReviewResult;
       deckStatus: DeckStatus;
       events: AgentEvent[];
-      decisionRequest: DecisionRequest;
     };
   } {
     const nextVersionId = this.options.repo.nextVersionId(deckId);
     const sourceVersion = this.options.repo.requireVersion(deckId, plan.createdFromVersionId);
     this.options.store.createVersionFromSource(deckId, sourceVersion.versionId, nextVersionId);
     const nextExtractedPath = this.options.store.versionExtractedPath(deckId, nextVersionId);
-    const changedSlides = applyTextOperations({
+    const sourceGraph = this.readGraph(deckId, sourceVersion.versionId);
+    validatePlanAgainstRegistry(plan, sourceGraph);
+    const changedSlides = applyRegistryOperations({
       repo: this.options.repo,
       presentationId: deckId,
       sourceVersionId: sourceVersion.versionId,
@@ -456,27 +540,6 @@ export class WorkflowService {
     this.options.repo.updatePlanStatus(plan.planId, "applied");
 
     const reviewResult = this.reviewResult(deckId, sourceVersion.versionId, nextVersionId, changedSlides);
-    const acceptDecision = this.createDecision({
-      deckId,
-      versionId: nextVersionId,
-      planId: plan.planId,
-      action: "accept_version",
-      purpose: "final_edit_review",
-      sourceVersionId: sourceVersion.versionId,
-      subjectVersionId: nextVersionId,
-      kind: "approval",
-      title: `Accept this edit?`,
-      question: `Accept this edit?`,
-      context: `${changedSlides.length} changed slide(s), ${reviewResult.validationSummary.blockingCount} blocking issue(s), ${reviewResult.validationSummary.warningCount} warning(s).`,
-      inputMode: "single_choice",
-      options: [
-        { id: "accept", label: "Accept Edit", description: `Keep ${nextVersionId} as the accepted version.` },
-        { id: "refine", label: "Refine Further", description: "Keep this version active and continue editing." },
-        { id: "reject", label: "Reject", description: "Restore the previous working version." },
-      ],
-      defaultOptionId: "accept",
-    });
-
     return {
       outputVersionId: nextVersionId,
       jobResult: {
@@ -486,11 +549,9 @@ export class WorkflowService {
           applyDecisionId,
           sourceVersion.versionId,
           nextVersionId,
-          acceptDecision.decisionId,
           changedSlides,
           reviewResult.validationSummary.warningCount,
         ),
-        decisionRequest: stripDecision(acceptDecision),
       },
     };
   }
@@ -571,26 +632,13 @@ export class WorkflowService {
     decisionId: string,
   ): ProposalPreview {
     const graph = this.readGraph(deckId, versionId);
-    const previewGraph = cloneGraph(graph);
-    for (const op of plan.operations) {
-      if (op.operationType !== "replace_text") continue;
-      const [slideId, elementId] = op.targetRef.split(".");
-      const slide = previewGraph.slides.find((candidate) => candidate.slideId === slideId);
-      const element = slide?.elements.find((candidate) => candidate.elementId === elementId);
-      if (element) element.text = op.after;
-    }
+    validatePlanAgainstRegistry(plan, graph);
+    const { graph: previewGraph, highlightElementIds } = previewPlanOnGraph(plan, graph);
 
     const slideId = plan.affectedSlides[0] ?? targetSlideFromPlan(plan) ?? previewGraph.slides[0]?.slideId;
     if (!slideId) throw conflict("PREVIEW_TARGET_NOT_FOUND", "No slide was available for preview.");
     const slide = previewGraph.slides.find((candidate) => candidate.slideId === slideId);
     if (!slide) throw conflict("PREVIEW_TARGET_NOT_FOUND", "Preview slide was not found.");
-    const highlightElementIds = plan.operations
-      .filter((operation) => operation.operationType === "replace_text")
-      .map((operation) => operation.targetRef.split("."))
-      .filter(([operationSlideId]) => operationSlideId === slideId)
-      .map(([, elementId]) => elementId)
-      .filter((elementId): elementId is string => Boolean(elementId));
-
     const previewPath = this.options.store.proposalPreviewPath(
       deckId,
       versionId,
@@ -619,35 +667,6 @@ export class WorkflowService {
       targetRefs,
       operations: plan.operations,
     };
-  }
-
-  private resolveTarget(input: RequestEditInput): SlideElementRecord {
-    const slideId = input.selectedSlideId;
-    const selected = input.selectedElementIds?.[0];
-    if (slideId && selected) {
-      const element = this.options.repo.getElementByTargetRef(
-        input.deckId,
-        input.versionId,
-        `${slideId}.${selected}`,
-      );
-      if (element) return element;
-    }
-    const slideElements = slideId
-      ? this.options.repo.listElements(input.deckId, input.versionId, slideId)
-      : this.options.repo.listElements(input.deckId, input.versionId);
-    const title = slideElements.find((element) => element.role === "title");
-    const target = title ?? slideElements[0];
-    if (!target) {
-      throw conflict("TARGET_NOT_FOUND", "No editable text target was found.");
-    }
-    return target;
-  }
-
-  private requireGraphSlide(deckId: string, versionId: string, slideId: string): GraphSlide {
-    const graph = this.readGraph(deckId, versionId);
-    const slide = graph.slides.find((candidate) => candidate.slideId === slideId);
-    if (!slide) throw notFound("SLIDE_NOT_FOUND", "Slide not found.");
-    return slide;
   }
 
   private readGraph(deckId: string, versionId: string): CanonicalGraph {
@@ -838,6 +857,37 @@ function allowsMultiSlideRequest(message: string): boolean {
   return /\b(all|every|entire|whole|deck|presentation|multiple|slides)\b/i.test(message);
 }
 
+function explicitSlideId(message: string, graph: CanonicalGraph): string | undefined {
+  const numeric = /\bslide\s+(\d+)\b/i.exec(message)?.[1];
+  if (numeric) {
+    const id = `slide_${Number(numeric)}`;
+    return graph.slides.some((slide) => slide.slideId === id) ? id : undefined;
+  }
+  const word = /\bslide\s+(one|two|three|four|five|six|seven|eight|nine|ten)\b/i.exec(message)?.[1];
+  if (word) {
+    const number = wordToNumber(word);
+    const id = `slide_${number}`;
+    return graph.slides.some((slide) => slide.slideId === id) ? id : undefined;
+  }
+  return undefined;
+}
+
+function wordToNumber(value: string): number {
+  const map: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+  };
+  return map[value.toLowerCase()] ?? 0;
+}
+
 function targetSlideFromPlan(plan: EditPlan): string | undefined {
   return plan.operations
     .map((operation) => targetSlideFromRef(operation.targetRef))
@@ -846,10 +896,6 @@ function targetSlideFromPlan(plan: EditPlan): string | undefined {
 
 function targetSlideFromRef(targetRef: string): string | undefined {
   return targetRef.split(".")[0] || undefined;
-}
-
-function cloneGraph(graph: CanonicalGraph): CanonicalGraph {
-  return JSON.parse(JSON.stringify(graph)) as CanonicalGraph;
 }
 
 function publicJob(job: JobStatus): JobStatus {
@@ -877,25 +923,29 @@ function stripDecision(decision: StoredDecision): DecisionRequest {
 
 function createPlanEvents(
   message: string,
-  target: SlideElementRecord,
   versionId: string,
   plan: EditPlan,
   decision: StoredDecision,
+  selection: OperationSelection,
 ): AgentEvent[] {
-  const targetRef = `${target.slideId}.${target.elementId}`;
   const proseId = makeId("prose");
-  const replacement = plan.operations.find((op) => op.operationType === "replace_text");
+  const primaryOperation = plan.operations.find((op) => op.operationType !== "fit_text") ?? plan.operations[0];
+  const targetRef = primaryOperation?.targetRef ?? selection.targetRef ?? "unknown";
+  const slideId = targetSlideFromRef(targetRef) ?? plan.affectedSlides[0] ?? "slide";
+  const operationSummaries = plan.operations
+    .map((operation) => operation.preview)
+    .filter((preview): preview is NonNullable<EditOperation["preview"]> => Boolean(preview));
   const resolveChip: ToolChip = {
     chipId: makeId("chip"),
     verb: "resolve_target",
     status: "done",
     icon: "check",
     title: "Resolve target",
-    subtitle: `${targetRef} · conf 0.90`,
+    subtitle: `${targetRef} · conf ${selection.confidence.toFixed(2)}`,
     body: {
       kind: "target_resolution",
       targetRef,
-      confidence: 0.9,
+      confidence: selection.confidence,
     },
   };
   const planChip: ToolChip = {
@@ -904,7 +954,13 @@ function createPlanEvents(
     status: "done",
     icon: "check",
     title: "Create edit plan",
-    subtitle: `${plan.planId} · ${target.slideId} · ${plan.operations.length} ops`,
+    subtitle: `${plan.planId} · ${slideId} · ${plan.operations.length} ops`,
+    body: operationSummaries.length
+      ? {
+          kind: "operation_list",
+          operations: operationSummaries,
+        }
+      : undefined,
   };
   const applyChip: ToolChip = {
     chipId: decision.decisionId,
@@ -915,13 +971,11 @@ function createPlanEvents(
     sourceVersionId: versionId,
     subjectVersionId: versionId,
     title: `Apply edit plan to ${versionId}`,
-    subtitle: `${plan.planId} · ${target.slideId} · ${plan.operations.length} ops`,
-    body: replacement
+    subtitle: `${plan.planId} · ${slideId} · ${plan.operations.length} ops`,
+    body: operationSummaries.length
       ? {
-          kind: "text_diff",
-          before: replacement.before,
-          after: replacement.after,
-          flags: ["preserve style", "preserve bounds"],
+          kind: "operation_list",
+          operations: operationSummaries,
         }
       : undefined,
     input: {
@@ -932,11 +986,15 @@ function createPlanEvents(
   };
   return [
     { type: "user_message", itemId: makeId("user"), text: message },
+    reasoningEvent("Checking the selected slide."),
+    reasoningEvent("Selecting from the allowed operation menu."),
+    reasoningEvent("Preparing a preview."),
+    reasoningEvent("Checking that the plan stays in scope."),
     { type: "prose_start", itemId: proseId },
     {
       type: "prose_chunk",
       itemId: proseId,
-      delta: "I found the editable text target and prepared a version-bound plan.",
+      delta: "I selected an allowed operation and prepared a version-bound preview.",
     },
     { type: "prose_end", itemId: proseId },
     { type: "tool_start", chip: resolveChip },
@@ -946,11 +1004,66 @@ function createPlanEvents(
   ];
 }
 
+function createClarificationEvents(
+  message: string,
+  decision: StoredDecision,
+  selection: OperationSelection,
+): AgentEvent[] {
+  const proseId = makeId("prose");
+  const chip: ToolChip = {
+    chipId: decision.decisionId,
+    verb: "resolve_target",
+    status: "awaiting_input",
+    icon: "warning",
+    purpose: "choose_target",
+    sourceVersionId: decision.versionId,
+    subjectVersionId: decision.versionId,
+    title: decision.title,
+    subtitle: selection.reason,
+    input: decision.options?.length
+      ? {
+          mode: "single_choice",
+          options: decision.options,
+        }
+      : {
+          mode: "free_text",
+          placeholder: "Describe which object to edit",
+        },
+  };
+  return [
+    { type: "user_message", itemId: makeId("user"), text: message },
+    reasoningEvent("Checking the selected slide."),
+    reasoningEvent("Selecting from the allowed operation menu.", "failed"),
+    { type: "prose_start", itemId: proseId },
+    {
+      type: "prose_chunk",
+      itemId: proseId,
+      delta: "I need to resolve the exact edit target before preparing a preview.",
+    },
+    { type: "prose_end", itemId: proseId },
+    { type: "tool_start", chip },
+  ];
+}
+
+function clarifyTargetResolvedEvents(decisionId: string): AgentEvent[] {
+  return [
+    {
+      type: "tool_complete",
+      chipId: decisionId,
+      patch: {
+        status: "done",
+        icon: "check",
+        input: undefined,
+        subtitle: "target clarification captured",
+      },
+    },
+  ];
+}
+
 function applyCompleteEvents(
   applyDecisionId: string,
   sourceVersionId: string,
   outputVersionId: string,
-  acceptDecisionId: string,
   changedSlides: string[],
   warnings: number,
 ): AgentEvent[] {
@@ -979,43 +1092,43 @@ function applyCompleteEvents(
     title: `Validate ${outputVersionId}`,
     subtitle: `${changedSlides.length} changed · 0 blocking · ${warnings} warnings`,
   };
-  const acceptChip: ToolChip = {
-    chipId: acceptDecisionId,
-    verb: "accept_version",
-    status: "awaiting_input",
-    icon: "check",
-    purpose: "final_edit_review",
-    sourceVersionId,
-    subjectVersionId: outputVersionId,
-    title: "Accept this edit?",
-    subtitle: "render and validation complete",
-    body: {
-      kind: "validation",
-      changed: changedSlides.length,
-      blocking: 0,
-      warnings,
-    },
-    input: {
-      mode: "single_choice",
-      options: [
-        { id: "accept", label: "Accept Edit" },
-        { id: "refine", label: "Refine Further" },
-        { id: "reject", label: "Reject" },
-      ],
-    },
-  };
   return [
     {
       type: "tool_complete",
       chipId: applyDecisionId,
       patch: { status: "done", icon: "check", input: undefined, subtitle: "approved" },
     },
+    reasoningEvent("Applying the approved edit."),
+    reasoningEvent("Rendering the updated slide."),
+    reasoningEvent("Validating the changed slide."),
     { type: "tool_start", chip: editChip },
     { type: "tool_start", chip: renderChip },
     { type: "tool_start", chip: validateChip },
-    { type: "tool_start", chip: acceptChip },
-    { type: "banner", tone: "info", text: "Render produced · awaiting accept" },
+    { type: "banner", tone: "info", text: "Applied · draft version active · export available" },
   ];
+}
+
+function truncateText(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
+}
+
+function reasoningEvent(
+  text: string,
+  status: "running" | "done" | "failed" = "done",
+): AgentEvent {
+  return {
+    type: "reasoning",
+    itemId: makeId("reasoning"),
+    status,
+    text: truncateReasoningText(text),
+  };
+}
+
+function truncateReasoningText(text: string): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  const words = clean.split(" ").filter(Boolean);
+  if (words.length <= 60) return clean;
+  return `${words.slice(0, 60).join(" ")}...`;
 }
 
 function acceptVersionEvents(decisionId: string, versionId: string): AgentEvent[] {

@@ -60,6 +60,7 @@ export function slideToSvg(
   const scaleX = width / slide.widthEmu;
   const scaleY = height / slide.heightEmu;
   const highlighted = new Set(options.highlightElementIds ?? []);
+  const background = normalizeHexColor(slide.backgroundColor) ?? "#ffffff";
   const elements = slide.elements
     .map((element) => {
       const x = Math.max(24, element.bounds.x * scaleX);
@@ -76,10 +77,15 @@ export function slideToSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img">
-  <rect width="${width}" height="${height}" fill="#ffffff"/>
+  <rect width="${width}" height="${height}" fill="${background}"/>
   <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="10" fill="none" stroke="#d1d5db"/>
   ${elements}
 </svg>`;
+}
+
+function normalizeHexColor(value: string | undefined): string | undefined {
+  if (!value || !/^[0-9A-Fa-f]{6}$/.test(value)) return undefined;
+  return `#${value.toUpperCase()}`;
 }
 
 function truncate(text: string, maxWidth: number, fontSize: number): string {

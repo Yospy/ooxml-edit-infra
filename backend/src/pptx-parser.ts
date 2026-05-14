@@ -63,10 +63,17 @@ function parseSlide(extractedPath: string, part: string, number: number): GraphS
     number,
     title,
     subtitle,
+    backgroundColor: extractBackgroundColor(xml),
     widthEmu: DEFAULT_WIDTH_EMU,
     heightEmu: DEFAULT_HEIGHT_EMU,
     elements,
   };
+}
+
+function extractBackgroundColor(xml: string): string | undefined {
+  const bg = /<p:bg\b[\s\S]*?<\/p:bg>/.exec(xml)?.[0];
+  const color = bg ? /<a:srgbClr\b[^>]*\bval="([0-9A-Fa-f]{6})"/.exec(bg)?.[1] : undefined;
+  return color?.toUpperCase();
 }
 
 function parseShapes(xml: string, part: string, slideId: string): SlideElementRecord[] {

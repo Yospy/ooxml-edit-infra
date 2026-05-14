@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   ArrowDownToLine,
   ArrowUp,
+  Brain,
   Check,
   CircleDot,
   Cog,
@@ -34,7 +35,6 @@ import {
   respondToDecision,
   uploadDeck,
   type ApplyJobResult,
-  type DecisionResponseResult,
 } from "@/lib/backend-client";
 import type {
   ActivityDetailGroup,
@@ -152,11 +152,7 @@ function chooseRestoredSlide(deck: DeckStatus, preferredSlideId?: string): strin
 function resolveRestoredMode(
   storedMode?: UiState,
   storedReview?: ReviewResult | null,
-  storedProposal?: ProposalPreview | null,
 ): UiState {
-  if (storedProposal && storedMode === "awaiting_plan_approval") {
-    return "awaiting_plan_approval";
-  }
   if (storedReview && (storedMode === "review_ready" || storedMode === "accepted")) {
     return storedMode;
   }
@@ -176,15 +172,19 @@ function buildPlanAssistantTurn(
   const chips = chipsFromEvents(events);
   const target = chips.find((chip) => chip.verb === "resolve_target");
   const plan = chips.find((chip) => chip.verb === "create_plan");
-  const change = proposal.operations.find(
-    (operation) => operation.operationType === "replace_text",
+  const operation = proposal.operations.find(
+    (candidate) => candidate.operationType !== "fit_text",
   );
-  const slideLabel = slide ? `Slide ${slide.number}` : proposal.slideId;
+  const slideLabel = slide?.slideId === proposal.slideId ? `Slide ${slide.number}` : proposal.slideId;
+  const isBackground = operation?.operationType === "set_slide_background";
   return [
+    ...reasoningItemsFromEvents(events),
     {
       kind: "assistant_summary",
       itemId: makeLocalItemId("assistant"),
-      text: `I found the editable title on ${slideLabel} and prepared a preview. The proposed change is visible on the slide.`,
+      text: isBackground
+        ? `I prepared a preview for the background color on ${slideLabel}.`
+        : `I found the editable text target on ${slideLabel} and prepared a preview.`,
       details: compactDetailGroups([
         {
           label: "Target",
@@ -196,10 +196,10 @@ function buildPlanAssistantTurn(
         },
         {
           label: "Change",
-          rows: change
+          rows: operation
             ? [
-                { label: "Before", value: change.before },
-                { label: "After", value: change.after },
+                { label: "Before", value: operation.before },
+                { label: "After", value: operation.after },
               ]
             : [{ label: "Operations", value: String(proposal.operations.length) }],
         },
@@ -213,81 +213,74 @@ function buildPlanAssistantTurn(
         },
       ]),
     },
+    ...chips
+      .filter((chip) => chip.verb === "apply_plan")
+      .map((chip) => ({ kind: "chip" as const, itemId: chip.chipId, chip })),
+  ];
+}
+
+function buildClarificationAssistantTurn(
+  events: AgentEvent[],
+  decisionRequest: DecisionRequest,
+): PanelItem[] {
+  const chips = chipsFromEvents(events);
+  const resolve = chips.find((chip) => chip.verb === "resolve_target");
+  return [
+    ...reasoningItemsFromEvents(events),
     {
-      kind: "decision",
-      itemId: proposal.decisionId,
-      decisionId: proposal.decisionId,
-      verb: "apply_plan",
-      status: "awaiting_input",
-      title: "Apply this preview?",
-      subtitle: "The PPTX will change only after you apply it.",
-      options: [
-        { id: "reject", label: "Reject", tone: "secondary" },
-        { id: "refine", label: "Refine", tone: "secondary" },
-        { id: "apply", label: "Apply", tone: "primary" },
-      ],
+      kind: "assistant_summary",
+      itemId: makeLocalItemId("assistant"),
+      text: "I need the exact text target before I can update the slide.",
+    },
+    {
+      kind: "chip",
+      itemId: resolve?.chipId ?? decisionRequest.decisionId,
+      chip:
+        resolve ?? {
+          chipId: decisionRequest.decisionId,
+          verb: "resolve_target",
+          status: "awaiting_input",
+          icon: "warning",
+          purpose: "choose_target",
+          title: decisionRequest.title,
+          subtitle: decisionRequest.context,
+          input: decisionRequest.options?.length
+            ? { mode: "single_choice", options: decisionRequest.options }
+            : { mode: "free_text", placeholder: "Describe which text box to edit" },
+        },
     },
   ];
 }
 
-function buildAppliedAssistantTurn(
-  events: AgentEvent[],
-  reviewResult: ReviewResult,
-  decisionRequest: DecisionRequest,
-): PanelItem[] {
-  const chips = chipsFromEvents(events);
-  const validate = chips.find((chip) => chip.verb === "validate");
-  const changedSlides = reviewResult.changedSlides.join(", ") || "none";
-  const blocking = reviewResult.validationSummary.blockingCount;
-  const warnings = reviewResult.validationSummary.warningCount;
-  const validationText =
-    blocking === 0 && warnings === 0
-      ? "Validation passed with no blocking issues or warnings."
-      : `Validation found ${blocking} blocking issue(s) and ${warnings} warning(s).`;
+function reasoningItemsFromEvents(events: AgentEvent[]): PanelItem[] {
+  const reasoning = events.filter((event) => event.type === "reasoning");
+  if (!reasoning.length) return [];
+  return [
+    {
+      kind: "reasoning",
+      itemId: makeLocalItemId("reasoning"),
+      title: "Reasoning",
+      events: reasoning.map((event) => ({
+        itemId: event.itemId,
+        status: event.status,
+        text: event.text,
+      })),
+    },
+  ];
+}
+
+function buildAppliedAssistantTurn(): PanelItem[] {
   return [
     {
       kind: "assistant_summary",
       itemId: makeLocalItemId("assistant"),
-      text: `I applied the edit and rendered the updated slide. ${validationText}`,
-      details: compactDetailGroups([
-        {
-          label: "Version",
-          rows: [
-            { label: "Source", value: reviewResult.inputVersionId },
-            { label: "Output", value: reviewResult.outputVersionId },
-            { label: "Changed slides", value: changedSlides },
-          ],
-        },
-        {
-          label: "Validation",
-          rows: [
-            { label: "Blocking", value: String(blocking) },
-            { label: "Warnings", value: String(warnings) },
-            ...(validate?.subtitle ? [{ label: "Summary", value: validate.subtitle }] : []),
-          ],
-        },
-      ]),
-    },
-    {
-      kind: "decision",
-      itemId: decisionRequest.decisionId,
-      decisionId: decisionRequest.decisionId,
-      verb: "accept_version",
-      status: "awaiting_input",
-      title: "Accept this version?",
-      subtitle: "Keep the edit, refine it further, or restore the previous version.",
-      options: [
-        { id: "reject", label: "Reject", tone: "danger" },
-        { id: "refine", label: "Refine", tone: "secondary" },
-        { id: "accept", label: "Accept", tone: "primary" },
-      ],
+      text: "Done. Updated the slide.",
     },
   ];
 }
 
 function buildDecisionResultSummary(
   response: ChipResponse,
-  result: DecisionResponseResult,
 ): PanelItem[] {
   if (response.verb === "apply_plan") {
     const refined = response.selectedId === "refine";
@@ -314,20 +307,15 @@ function buildDecisionResultSummary(
         kind: "assistant_summary",
         itemId: makeLocalItemId("assistant"),
         text,
-        details: result.deckStatus
-          ? [
-              {
-                label: "Workspace",
-                rows: [
-                  { label: "Active version", value: result.deckStatus.activeVersionId },
-                  {
-                    label: "Changed slides",
-                    value: String(result.deckStatus.changedSlides.length),
-                  },
-                ],
-              },
-            ]
-          : undefined,
+      },
+    ];
+  }
+  if (response.verb === "resolve_target") {
+    return [
+      {
+        kind: "assistant_summary",
+        itemId: makeLocalItemId("assistant"),
+        text: "Target clarification captured. Send the edit prompt again to prepare the preview.",
       },
     ];
   }
@@ -361,17 +349,30 @@ function markDecisionDone(panel: PanelItem[], decisionId: string): PanelItem[] {
   return panel.map((item) =>
     item.kind === "decision" && item.decisionId === decisionId
       ? { ...item, status: "done" }
+      : item.kind === "chip" && item.chip.chipId === decisionId
+        ? { ...item, chip: { ...item.chip, status: "done", input: undefined } }
       : item,
   );
 }
 
 function cleanStoredPanel(panel: PanelItem[] = []): PanelItem[] {
-  return panel.filter(
-    (item) =>
-      item.kind !== "chip" &&
-      item.kind !== "assistant_activity" &&
-      !(item.kind === "prose" && item.streaming),
-  );
+  const cleaned: PanelItem[] = [];
+  for (const item of panel) {
+    if (
+      item.kind === "chip" ||
+      item.kind === "reasoning" ||
+      item.kind === "decision" ||
+      (item.kind === "prose" && item.streaming)
+    ) {
+      continue;
+    }
+    if (item.kind === "assistant_summary") {
+      cleaned.push({ ...item, actions: undefined, details: undefined });
+      continue;
+    }
+    cleaned.push(item);
+  }
+  return cleaned;
 }
 
 function cleanStoredPanelMap(
@@ -508,11 +509,6 @@ export default function Home() {
         const restoredReview = storedMatchesActiveVersion
           ? (stored?.reviewResult ?? null)
           : null;
-        const restoredProposal =
-          storedMatchesActiveVersion &&
-          stored?.proposalPreview?.versionId === restoredDeck.activeVersionId
-            ? stored.proposalPreview
-            : null;
         const restoredSlideId = chooseRestoredSlide(
           restoredDeck,
           stored?.selectedSlideId,
@@ -541,9 +537,9 @@ export default function Home() {
         setPanel(restoredPanel);
         setPanelOpen(stored?.panelOpen ?? true);
         setReviewResult(restoredReview);
-        setProposalPreview(restoredProposal);
+        setProposalPreview(null);
         setCompareOpen(storedMatchesActiveVersion ? (stored?.compareOpen ?? false) : false);
-        setMode(resolveRestoredMode(stored?.mode, restoredReview, restoredProposal));
+        setMode(resolveRestoredMode(stored?.mode, restoredReview));
       } catch (error) {
         console.error(error);
         clearStoredWorkspace();
@@ -664,14 +660,15 @@ export default function Home() {
       ...prev,
       { kind: "user", itemId: makeLocalItemId("user"), text: message },
       {
-        kind: "assistant_activity",
+        kind: "reasoning",
         itemId: planningItemId,
-        title: "Working on the selected slide",
-        steps: [
-          "Reading the current slide context",
-          "Finding the editable text target",
-          "Preparing an inline preview",
-          "Checking that only this slide changes",
+        title: "Reasoning",
+        events: [
+          {
+            itemId: `${planningItemId}_event`,
+            status: "running",
+            text: "Preparing the edit preview.",
+          },
         ],
       },
     ]);
@@ -693,17 +690,28 @@ export default function Home() {
             }
           : undefined,
         selectedElementIds: [],
+        visibleSlideIds: deck.slides.map((slide) => slide.slideId),
         message,
       });
-      setPanel((prev) => [
-        ...prev.filter((item) => item.itemId !== planningItemId),
-        ...buildPlanAssistantTurn(result.events, result.proposalPreview, selectedSlide),
-      ]);
       setActiveThreadId(result.threadId);
       void refreshThreads(deck.deckId);
-      setProposalPreview(result.proposalPreview);
-      setCompareOpen(false);
-      setMode("awaiting_plan_approval");
+      if (result.proposalPreview) {
+        setPanel((prev) => [
+          ...prev.filter((item) => item.itemId !== planningItemId),
+          ...buildPlanAssistantTurn(result.events, result.proposalPreview!, selectedSlide),
+        ]);
+        setProposalPreview(result.proposalPreview);
+        setCompareOpen(false);
+        setMode("awaiting_plan_approval");
+      } else {
+        setPanel((prev) => [
+          ...prev.filter((item) => item.itemId !== planningItemId),
+          ...buildClarificationAssistantTurn(result.events, result.decisionRequest),
+        ]);
+        setProposalPreview(null);
+        setCompareOpen(false);
+        setMode(result.uiState);
+      }
     } catch (error) {
       console.error(error);
       setPanel((prev) => [
@@ -730,6 +738,8 @@ export default function Home() {
         prev.map((item) =>
           item.kind === "decision" && item.decisionId === response.chipId
             ? { ...item, status: "submitting" }
+            : item.kind === "chip" && item.chip.chipId === response.chipId
+              ? { ...item, chip: { ...item.chip, status: "submitting" } }
             : item,
         ),
       );
@@ -751,14 +761,10 @@ export default function Home() {
           setReviewResult(job.result.reviewResult);
           setMode("review_ready");
         }
-        if (job.result?.events && job.result.reviewResult && job.result.decisionRequest) {
+        if (job.result?.events && job.result.reviewResult) {
           setPanel((prev) => [
             ...markDecisionDone(prev, response.chipId),
-            ...buildAppliedAssistantTurn(
-              job.result!.events,
-              job.result!.reviewResult,
-              job.result!.decisionRequest,
-            ),
+            ...buildAppliedAssistantTurn(),
           ]);
         }
         void refreshThreads(deck.deckId);
@@ -783,7 +789,7 @@ export default function Home() {
       }
       setPanel((prev) => [
         ...markDecisionDone(prev, response.chipId),
-        ...buildDecisionResultSummary(response, result),
+        ...buildDecisionResultSummary(response),
       ]);
       setMode(result.uiState);
       void refreshThreads(deck.deckId);
@@ -858,14 +864,6 @@ export default function Home() {
               proposalPreview={proposalPreview}
               compareOpen={compareOpen}
               onCompareOpenChange={setCompareOpen}
-              onProposalDecision={(selectedId) => {
-                if (!proposalPreview) return;
-                void onChipResponse({
-                  chipId: proposalPreview.decisionId,
-                  verb: "apply_plan",
-                  selectedId,
-                });
-              }}
             />
             {panelOpen ? (
               <div className="min-h-0 p-3 pl-0">
@@ -1231,7 +1229,6 @@ function RenderCanvas({
   proposalPreview,
   compareOpen,
   onCompareOpenChange,
-  onProposalDecision,
 }: {
   mode: UiState;
   slide?: Slide;
@@ -1240,13 +1237,12 @@ function RenderCanvas({
   proposalPreview: ProposalPreview | null;
   compareOpen: boolean;
   onCompareOpenChange: (open: boolean) => void;
-  onProposalDecision: (selectedId: "apply" | "reject") => void;
 }) {
   const reviewMode = mode === "review_ready" || mode === "accepted";
-  const hasInlineProposal =
-    mode === "awaiting_plan_approval" &&
-    proposalPreview?.slideId === slide?.slideId;
-  const activeProposal = hasInlineProposal ? proposalPreview : null;
+  const activeProposal =
+    mode === "awaiting_plan_approval" && proposalPreview?.slideId === slide?.slideId
+      ? proposalPreview
+      : null;
   const selectedReviewPreview = reviewResult?.slidePreviews.find(
     (preview) => preview.slideId === slide?.slideId,
   );
@@ -1260,13 +1256,6 @@ function RenderCanvas({
           renderUrl: reviewPreview.before.renderUrl,
         }
       : slide;
-  const proposalSlide =
-    slide && activeProposal
-      ? {
-          ...slide,
-          renderUrl: activeProposal.renderUrl,
-        }
-      : slide;
   const afterSlide =
     slide && selectedReviewPreview
       ? {
@@ -1276,9 +1265,16 @@ function RenderCanvas({
           renderUrl: selectedReviewPreview.after.renderUrl,
         }
       : slide;
-  const canCompare = Boolean(hasInlineProposal || selectedReviewPreview);
-  const activeSlide = hasInlineProposal ? proposalSlide : afterSlide;
-  const activeTitle = hasInlineProposal
+  const proposalSlide =
+    slide && activeProposal
+      ? {
+          ...slide,
+          renderUrl: activeProposal.renderUrl,
+        }
+      : slide;
+  const canCompare = Boolean(activeProposal || selectedReviewPreview);
+  const activeSlide = activeProposal ? proposalSlide : afterSlide;
+  const activeTitle = activeProposal
     ? "Proposed preview"
     : reviewMode && selectedReviewPreview
       ? "Applied render"
@@ -1289,14 +1285,14 @@ function RenderCanvas({
       <div className="flex h-12 items-center justify-between border-b bg-background px-5">
         <div>
           <div className="text-sm font-semibold">
-            {hasInlineProposal ? "Inline slide preview" : "Rendered slide"}
+            {activeProposal ? "Inline slide preview" : "Rendered slide"}
           </div>
           <div className="text-xs text-muted-foreground">
-            {hasInlineProposal
+            {activeProposal
               ? "Preview only. The PPTX changes after Apply."
               : reviewMode
                 ? "Current backend render. Compare is available on demand."
-                : "Current backend render. No mutation before approval."}
+                : "Current backend render."}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -1309,22 +1305,8 @@ function RenderCanvas({
               {compareOpen ? "Hide Compare" : "Compare"}
             </Button>
           ) : null}
-          {hasInlineProposal ? (
-            <>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => onProposalDecision("reject")}
-              >
-                Reject
-              </Button>
-              <Button size="sm" onClick={() => onProposalDecision("apply")}>
-                Apply
-              </Button>
-            </>
-          ) : null}
-          <Badge variant={hasInlineProposal ? "secondary" : "outline"} className="rounded-md">
-            {hasInlineProposal ? "Preview" : slide ? `Slide ${slide.number}` : "No slide"}
+          <Badge variant={activeProposal ? "secondary" : "outline"} className="rounded-md">
+            {activeProposal ? "Preview" : slide ? `Slide ${slide.number}` : "No slide"}
           </Badge>
         </div>
       </div>
@@ -1376,29 +1358,15 @@ function RenderCanvas({
               title={activeTitle}
               slide={activeSlide}
               version={activeVersionId}
-              highlighted={hasInlineProposal}
-              changed={hasInlineProposal || Boolean(selectedReviewPreview)}
+              highlighted={Boolean(activeProposal)}
+              changed={Boolean(activeProposal || selectedReviewPreview)}
               showCaption={false}
             />
             {activeProposal ? (
-              <div className="mt-3 flex items-center justify-between rounded-lg border bg-muted/30 px-4 py-3 text-sm">
-                <div className="min-w-0">
-                  <div className="font-medium">Pending change on this slide</div>
-                  <div className="truncate text-xs text-muted-foreground">
-                    {activeProposal.targetRefs.join(" · ")}
-                  </div>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => onProposalDecision("reject")}
-                  >
-                    Reject
-                  </Button>
-                  <Button size="sm" onClick={() => onProposalDecision("apply")}>
-                    Apply
-                  </Button>
+              <div className="mt-3 rounded-lg border bg-muted/30 px-4 py-3 text-sm">
+                <div className="font-medium">Pending change on this slide</div>
+                <div className="truncate text-xs text-muted-foreground">
+                  {activeProposal.targetRefs.join(" · ")}
                 </div>
               </div>
             ) : null}
@@ -1759,66 +1727,45 @@ function PanelTurn({
       </p>
     );
   }
-  if (item.kind === "assistant_activity") {
-    return <AssistantActivityTurn item={item} />;
+  if (item.kind === "reasoning") {
+    return <ReasoningTurn item={item} />;
   }
   if (item.kind === "assistant_summary") {
     return <AssistantSummaryTurn item={item} />;
   }
-  if (item.kind === "decision") {
-    return <AssistantDecisionCard item={item} onChipResponse={onChipResponse} />;
+  if (item.kind !== "chip") {
+    return null;
   }
   return <ToolChipCard chip={item.chip} onChipResponse={onChipResponse} />;
 }
 
-function AssistantActivityTurn({
-  item,
-}: {
-  item: Extract<PanelItem, { kind: "assistant_activity" }>;
-}) {
-  const [activeStep, setActiveStep] = useState(0);
-
-  useEffect(() => {
-    if (item.steps.length <= 1) return;
-    const timer = window.setInterval(() => {
-      setActiveStep((step) => (step + 1) % item.steps.length);
-    }, 1200);
-    return () => window.clearInterval(timer);
-  }, [item.steps.length]);
-
+function ReasoningTurn({ item }: { item: Extract<PanelItem, { kind: "reasoning" }> }) {
   return (
-    <div className="rounded-lg border bg-card px-3.5 py-3 text-sm shadow-sm">
-      <div className="flex items-center gap-2">
-        <span className="relative flex size-4 shrink-0 items-center justify-center">
-          <span className="absolute size-4 rounded-full bg-foreground/10 animate-ping" />
-          <Sparkles className="relative size-3.5 text-foreground" />
-        </span>
-        <span className="font-medium">{item.title}</span>
+    <div className="space-y-1.5 pt-1">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <Brain className="size-3.5" />
+        <span>{item.title ?? "Reasoning"}</span>
       </div>
-      <div className="mt-3 grid gap-2">
-        {item.steps.map((step, index) => {
-          const isActive = index === activeStep;
-          const isDone = index < activeStep;
-          return (
-            <div
-              key={step}
+      <div className="space-y-1.5 border-l border-border/70 ps-4">
+        {item.events.map((event) => (
+          <div
+            key={event.itemId}
+            className={cn(
+              "flex items-start gap-2 text-xs",
+              event.status === "failed" ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            <span
               className={cn(
-                "flex items-center gap-2 text-xs transition",
-                isActive ? "text-foreground" : "text-muted-foreground",
+                "mt-1.5 size-1.5 shrink-0 rounded-full",
+                event.status === "running" && "bg-foreground animate-pulse",
+                event.status === "done" && "bg-muted-foreground/70",
+                event.status === "failed" && "bg-destructive",
               )}
-            >
-              <span
-                className={cn(
-                  "size-1.5 rounded-full transition",
-                  isActive && "scale-125 bg-foreground",
-                  isDone && "bg-foreground/50",
-                  !isActive && !isDone && "bg-muted-foreground/35",
-                )}
-              />
-              <span className={cn(isActive && "animate-pulse")}>{step}</span>
-            </div>
-          );
-        })}
+            />
+            <span className="min-w-0 break-words">{event.text}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1829,105 +1776,17 @@ function AssistantSummaryTurn({
 }: {
   item: Extract<PanelItem, { kind: "assistant_summary" }>;
 }) {
-  const [open, setOpen] = useState(false);
-  const hasDetails = Boolean(item.details?.length);
   return (
-    <div className="space-y-2 rounded-lg border bg-card px-3.5 py-3 text-sm shadow-sm">
+    <AssistantMessageShell>
       <p className="leading-6 text-foreground">{item.text}</p>
-      {hasDetails ? (
-        <div>
-          <button
-            type="button"
-            onClick={() => setOpen((value) => !value)}
-            className="text-xs font-medium text-muted-foreground underline-offset-4 transition hover:text-foreground hover:underline"
-          >
-            {open ? "Hide details" : "Details"}
-          </button>
-          {open ? <ActivityDetails groups={item.details ?? []} /> : null}
-        </div>
-      ) : null}
-    </div>
+    </AssistantMessageShell>
   );
 }
 
-function ActivityDetails({ groups }: { groups: ActivityDetailGroup[] }) {
+function AssistantMessageShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mt-2 grid gap-2 rounded-md border bg-muted/30 p-2.5">
-      {groups.map((group) => (
-        <div key={group.label} className="grid gap-1.5">
-          <div className="text-[11px] font-medium uppercase text-muted-foreground">
-            {group.label}
-          </div>
-          <div className="grid gap-1">
-            {group.rows.map((row) => (
-              <div
-                key={`${group.label}-${row.label}`}
-                className="grid grid-cols-[84px_1fr] gap-2 text-xs"
-              >
-                <span className="text-muted-foreground">{row.label}</span>
-                <span className="min-w-0 break-words font-medium">{row.value}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function AssistantDecisionCard({
-  item,
-  onChipResponse,
-}: {
-  item: Extract<PanelItem, { kind: "decision" }>;
-  onChipResponse: (response: ChipResponse) => void;
-}) {
-  const isSubmitting = item.status === "submitting";
-  const isDone = item.status === "done";
-  return (
-    <div
-      className={cn(
-        "rounded-lg border bg-card px-3.5 py-3 text-sm shadow-sm",
-        item.status === "awaiting_input" && "border-foreground/30",
-        isDone && "opacity-70",
-      )}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="font-semibold leading-5">{item.title}</div>
-          {item.subtitle ? (
-            <div className="mt-1 text-xs leading-5 text-muted-foreground">
-              {item.subtitle}
-            </div>
-          ) : null}
-        </div>
-        {isSubmitting ? (
-          <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-muted-foreground" />
-        ) : isDone ? (
-          <Check className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-        ) : null}
-      </div>
-      {item.status === "awaiting_input" ? (
-        <div className="mt-3 grid grid-cols-3 gap-2">
-          {item.options.map((option) => (
-            <Button
-              key={option.id}
-              size="sm"
-              variant={option.tone === "primary" ? "default" : "outline"}
-              className={cn(option.tone === "danger" && "border-destructive/50")}
-              onClick={() =>
-                onChipResponse({
-                  chipId: item.decisionId,
-                  verb: item.verb,
-                  selectedId: option.id,
-                })
-              }
-            >
-              {option.label}
-            </Button>
-          ))}
-        </div>
-      ) : null}
+    <div className="max-w-[92%] space-y-2 text-sm">
+      {children}
     </div>
   );
 }
@@ -1946,21 +1805,21 @@ function ToolChipCard({
   const isFailed = chip.status === "failed";
 
   return (
-    <div
-      className={cn(
-        "rounded-lg border bg-card px-3 py-2.5 text-sm shadow-sm transition-colors",
-        isAwaiting && "border-foreground/30",
-        isFailed && "border-destructive/40 bg-destructive/[0.02]",
-      )}
-    >
-      <div className="flex items-start gap-2.5">
+    <AssistantMessageShell>
+      <div
+        className={cn(
+          "flex items-start gap-2.5 text-sm",
+          chip.status === "done" && "text-muted-foreground",
+          isFailed && "text-destructive",
+        )}
+      >
         <span
           className={cn(
-            "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md border bg-background text-muted-foreground",
+            "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground",
             isRunning && "animate-pulse",
             isAwaiting && "text-foreground",
             chip.status === "done" && "text-foreground",
-            isFailed && "border-destructive/40 text-destructive",
+            isFailed && "text-destructive",
           )}
         >
           <Icon className="size-3" />
@@ -1977,7 +1836,7 @@ function ToolChipCard({
           {chip.subtitle ? (
             <div className="text-xs text-muted-foreground">{chip.subtitle}</div>
           ) : null}
-          {chip.body ? <ChipBody body={chip.body} /> : null}
+          {chip.body ? <ChipBody body={chip.body} compact={chip.status === "done"} /> : null}
           {isAwaiting && chip.input ? (
             <ChipInputControls chip={chip} onChipResponse={onChipResponse} />
           ) : null}
@@ -1986,14 +1845,24 @@ function ToolChipCard({
           ) : null}
         </div>
       </div>
-    </div>
+    </AssistantMessageShell>
   );
 }
 
-function ChipBody({ body }: { body: NonNullable<ToolChip["body"]> }) {
+function ChipBody({
+  body,
+  compact = false,
+}: {
+  body: NonNullable<ToolChip["body"]>;
+  compact?: boolean;
+}) {
+  const shellClass = cn(
+    "grid gap-1 border-l border-border/70 ps-3 text-xs",
+    compact && "opacity-80",
+  );
   if (body.kind === "text_diff") {
     return (
-      <div className="grid gap-1 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+      <div className={shellClass}>
         <div className="text-muted-foreground">
           <span className="font-mono">−</span>&nbsp;&nbsp;{body.before}
         </div>
@@ -2008,9 +1877,26 @@ function ChipBody({ body }: { body: NonNullable<ToolChip["body"]> }) {
       </div>
     );
   }
+  if (body.kind === "operation_list") {
+    return (
+      <div className={shellClass}>
+        {body.operations.map((operation) => (
+          <div key={`${operation.operationType}-${operation.targetRef}`} className="grid gap-0.5">
+            <div className="font-medium">{operation.label}</div>
+            <div className="text-muted-foreground">
+              {operation.property ? `${operation.property}: ` : ""}
+              <span className="font-mono">{operation.before}</span>
+              <span className="px-1">-&gt;</span>
+              <span className="font-mono text-foreground">{operation.after}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
   if (body.kind === "validation") {
     return (
-      <div className="grid gap-1 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+      <div className={shellClass}>
         <KV label="changed" value={String(body.changed)} />
         <KV label="blocking" value={String(body.blocking)} />
         <KV
@@ -2026,13 +1912,13 @@ function ChipBody({ body }: { body: NonNullable<ToolChip["body"]> }) {
   }
   if (body.kind === "render_summary") {
     return (
-      <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+      <div className="border-l border-border/70 ps-3 text-xs text-muted-foreground">
         slides: {body.affectedSlides.join(" · ")}
       </div>
     );
   }
   return (
-    <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+    <div className="border-l border-border/70 ps-3 text-xs text-muted-foreground">
       target: <span className="font-mono">{body.targetRef}</span>
       &nbsp;·&nbsp;conf {(body.confidence * 100).toFixed(0)}%
     </div>
@@ -2061,11 +1947,11 @@ function ChipInputControls({
 
   if (input.mode === "yes_no") {
     return (
-      <div className="mt-2 flex gap-2">
+      <div className="mt-2 flex flex-wrap gap-2">
         <Button
           variant="outline"
           size="sm"
-          className="flex-1"
+          className="min-w-24"
           onClick={() =>
             onChipResponse({
               chipId: chip.chipId,
@@ -2078,7 +1964,7 @@ function ChipInputControls({
         </Button>
         <Button
           size="sm"
-          className="flex-1"
+          className="min-w-24"
           onClick={() =>
             onChipResponse({
               chipId: chip.chipId,
@@ -2096,7 +1982,7 @@ function ChipInputControls({
 
   if (input.mode === "single_choice") {
     return (
-      <div className="mt-2 grid gap-1.5">
+      <div className="mt-2 flex flex-wrap gap-1.5">
         {input.options.map((opt) => (
           <button
             key={opt.id}
@@ -2108,7 +1994,7 @@ function ChipInputControls({
                 selectedId: opt.id,
               })
             }
-            className="rounded-md border bg-background px-3 py-2 text-left text-sm transition hover:bg-muted"
+            className="max-w-full rounded-md border bg-background px-3 py-2 text-left text-sm transition hover:bg-muted"
           >
             <span className="block font-medium">{opt.label}</span>
             {opt.description ? (

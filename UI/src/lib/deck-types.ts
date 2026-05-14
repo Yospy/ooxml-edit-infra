@@ -52,12 +52,25 @@ export type DeckStatus = {
 
 export type EditOperation = {
   operationId: string;
-  operationType: "replace_text" | "fit_text" | "apply_style_ref";
+  operationType: "replace_text" | "fit_text" | "set_slide_background";
   targetRef: string;
   humanLabel: string;
   before: string;
   after: string;
   preserveStyle: boolean;
+  preserveBounds?: boolean;
+  args?: Record<string, string | number | boolean | null>;
+  preview?: OperationPreviewSummary;
+};
+
+export type OperationPreviewSummary = {
+  operationType: EditOperation["operationType"];
+  targetRef: string;
+  label: string;
+  kind: "text" | "property";
+  property?: string;
+  before: string;
+  after: string;
 };
 
 export type EditPlan = {
@@ -189,6 +202,7 @@ export type ToolIcon =
 
 export type ToolChipBody =
   | { kind: "text_diff"; before: string; after: string; flags: string[] }
+  | { kind: "operation_list"; operations: OperationPreviewSummary[] }
   | {
       kind: "validation";
       changed: number;
@@ -239,16 +253,21 @@ export type PanelItem =
   | { kind: "prose"; itemId: string; text: string; streaming?: boolean }
   | { kind: "user"; itemId: string; text: string }
   | {
-      kind: "assistant_activity";
+      kind: "reasoning";
       itemId: string;
-      title: string;
-      steps: string[];
+      title?: string;
+      events: Array<{
+        itemId: string;
+        status: "running" | "done" | "failed";
+        text: string;
+      }>;
     }
   | {
       kind: "assistant_summary";
       itemId: string;
       text: string;
       details?: ActivityDetailGroup[];
+      actions?: Array<{ id: "undo" | "refine"; label: string }>;
     }
   | {
       kind: "decision";
@@ -271,6 +290,12 @@ export type StateBannerModel = {
 
 export type AgentEvent =
   | { type: "user_message"; itemId: string; text: string }
+  | {
+      type: "reasoning";
+      itemId: string;
+      status: "running" | "done" | "failed";
+      text: string;
+    }
   | { type: "prose_start"; itemId: string }
   | { type: "prose_chunk"; itemId: string; delta: string }
   | { type: "prose_end"; itemId: string }
@@ -300,6 +325,7 @@ export type RequestEditInput = {
     activeVersionId: string;
   };
   selectedElementIds: string[];
+  visibleSlideIds?: string[];
   message: string;
 };
 
