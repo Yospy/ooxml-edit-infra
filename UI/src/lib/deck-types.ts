@@ -99,6 +99,26 @@ export type ReviewResult = {
   }>;
 };
 
+export type ProposalPreview = {
+  planId: string;
+  decisionId: string;
+  slideId: string;
+  versionId: string;
+  renderUrl?: string;
+  targetRefs: string[];
+  operations: EditOperation[];
+};
+
+export type ThreadSummary = {
+  threadId: string;
+  deckId: string;
+  title: string;
+  status: "active" | "archived";
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ProcessingProgress = {
   upload: number;
   parse: number;
@@ -206,9 +226,40 @@ export type ToolChip = {
   jobId?: string;
 };
 
+export type ActivityDetailGroup = {
+  label: string;
+  rows: Array<{ label: string; value: string }>;
+};
+
+export type AssistantDecisionOption = DecisionOption & {
+  tone?: "primary" | "secondary" | "danger";
+};
+
 export type PanelItem =
   | { kind: "prose"; itemId: string; text: string; streaming?: boolean }
   | { kind: "user"; itemId: string; text: string }
+  | {
+      kind: "assistant_activity";
+      itemId: string;
+      title: string;
+      steps: string[];
+    }
+  | {
+      kind: "assistant_summary";
+      itemId: string;
+      text: string;
+      details?: ActivityDetailGroup[];
+    }
+  | {
+      kind: "decision";
+      itemId: string;
+      decisionId: string;
+      verb: ToolVerb;
+      status: "awaiting_input" | "submitting" | "done";
+      title: string;
+      subtitle?: string;
+      options: AssistantDecisionOption[];
+    }
   | { kind: "chip"; itemId: string; chip: ToolChip };
 
 export type BannerTone = "info" | "warn";
@@ -239,7 +290,15 @@ export type AgentEvent =
 export type RequestEditInput = {
   deckId: string;
   versionId: string;
+  threadId?: string;
   slideId: string;
+  selectedSlideContext?: {
+    slideId: string;
+    number: number;
+    title: string;
+    subtitle: string;
+    activeVersionId: string;
+  };
   selectedElementIds: string[];
   message: string;
 };

@@ -232,6 +232,26 @@ export type ReviewResult = {
   }>;
 };
 
+export type ProposalPreview = {
+  planId: string;
+  decisionId: string;
+  slideId: string;
+  versionId: string;
+  renderUrl?: string;
+  targetRefs: string[];
+  operations: EditOperation[];
+};
+
+export type ThreadSummary = {
+  threadId: string;
+  deckId: string;
+  title: string;
+  status: "active" | "archived";
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ExportArtifact = {
   deckId: string;
   versionId: string;
@@ -262,8 +282,16 @@ export type JobStatus = {
 export type RequestEditInput = {
   deckId: string;
   versionId: string;
+  threadId?: string;
   message: string;
   selectedSlideId?: string;
+  selectedSlideContext?: {
+    slideId: string;
+    number: number;
+    title: string;
+    subtitle: string;
+    activeVersionId: string;
+  };
   selectedElementIds?: string[];
   visibleSlideIds?: string[];
   uiMode?: UiState;

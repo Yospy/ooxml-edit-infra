@@ -57,6 +57,19 @@ export class ArtifactStore {
     return resolve(this.versionDir(presentationId, versionId), "renders", `${slideId}-thumb.svg`);
   }
 
+  proposalPreviewPath(
+    presentationId: string,
+    versionId: string,
+    planId: string,
+    slideId: string,
+  ): string {
+    return resolve(
+      this.versionDir(presentationId, versionId),
+      "previews",
+      `${planId}-${slideId}.svg`,
+    );
+  }
+
   exportPath(presentationId: string, versionId: string, fileName: string): string {
     return resolve(this.presentationDir(presentationId), "exports", `${fileName}-${versionId}.pptx`);
   }

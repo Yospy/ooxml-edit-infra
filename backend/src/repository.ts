@@ -10,6 +10,7 @@ import type {
   ProcessingProgress,
   Slide,
   SlideStatus,
+  ThreadSummary,
   ValidationSummary,
   VersionNode,
 } from "./types.js";
@@ -109,6 +110,16 @@ export type StoredPlan = EditPlan & {
   userPrompt: string;
 };
 
+export type ThreadRow = {
+  id: string;
+  presentationId: string;
+  title: string;
+  status: "active" | "archived";
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+};
+
 export type ValidationIssue = {
   id: string;
   presentationId: string;
@@ -177,6 +188,17 @@ export class SQLiteRepository {
     const row = this.db
       .prepare(`SELECT * FROM presentations WHERE id = ?`)
       .get(id) as DbPresentation | undefined;
+    return row ? mapPresentation(row) : undefined;
+  }
+
+  getLatestPresentation(): PresentationRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM presentations
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1`,
+      )
+      .get() as DbPresentation | undefined;
     return row ? mapPresentation(row) : undefined;
   }
 
@@ -276,6 +298,67 @@ export class SQLiteRepository {
     return `v${Number(row.max_version ?? 0) + 1}`;
   }
 
+  createThread(presentationId: string, title = DEFAULT_THREAD_TITLE): ThreadSummary {
+    this.requirePresentation(presentationId);
+    const threadId = makeId("thread");
+    const timestamp = now();
+    this.db
+      .prepare(
+        `INSERT INTO threads
+          (id, presentation_id, title, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(threadId, presentationId, title, "active", timestamp, timestamp);
+    return toThreadSummary({
+      id: threadId,
+      presentationId,
+      title,
+      status: "active",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      messageCount: 0,
+    });
+  }
+
+  listThreads(presentationId: string): ThreadSummary[] {
+    this.requirePresentation(presentationId);
+    return (
+      this.db
+        .prepare(
+          `SELECT t.*,
+                  COUNT(m.id) AS message_count
+           FROM threads t
+           LEFT JOIN thread_messages m ON m.thread_id = t.id
+           WHERE t.presentation_id = ?
+           GROUP BY t.id
+           ORDER BY t.updated_at DESC, t.created_at DESC`,
+        )
+        .all(presentationId) as DbThread[]
+    ).map(mapThread).map(toThreadSummary);
+  }
+
+  getThread(threadId: string): ThreadRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT t.*,
+                COUNT(m.id) AS message_count
+         FROM threads t
+         LEFT JOIN thread_messages m ON m.thread_id = t.id
+         WHERE t.id = ?
+         GROUP BY t.id`,
+      )
+      .get(threadId) as DbThread | undefined;
+    return row ? mapThread(row) : undefined;
+  }
+
+  requireThreadForPresentation(presentationId: string, threadId: string): ThreadRow {
+    const thread = this.getThread(threadId);
+    if (!thread || thread.presentationId !== presentationId) {
+      throw new Error(`Thread not found for presentation: ${presentationId}/${threadId}`);
+    }
+    return thread;
+  }
+
   ensureThread(presentationId: string): string {
     const existing = this.db
       .prepare(
@@ -287,25 +370,24 @@ export class SQLiteRepository {
       .get(presentationId) as { id: string } | undefined;
     if (existing) return existing.id;
 
-    const threadId = makeId("thread");
-    const timestamp = now();
-    this.db
-      .prepare(
-        `INSERT INTO threads
-          (id, presentation_id, title, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(threadId, presentationId, DEFAULT_THREAD_TITLE, "active", timestamp, timestamp);
-    return threadId;
+    return this.createThread(presentationId).threadId;
   }
 
   saveThreadMessage(threadId: string, role: "user" | "assistant", content: string): void {
+    const timestamp = now();
     this.db
       .prepare(
         `INSERT INTO thread_messages (id, thread_id, role, content, created_at)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(makeId("msg"), threadId, role, content, now());
+      .run(makeId("msg"), threadId, role, content, timestamp);
+    this.db
+      .prepare(
+        `UPDATE threads
+         SET updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(timestamp, threadId);
   }
 
   replaceSlidesAndElements(graph: CanonicalGraph): void {
@@ -813,6 +895,30 @@ function mapPresentation(row: DbPresentation): PresentationRow {
   };
 }
 
+function mapThread(row: DbThread): ThreadRow {
+  return {
+    id: row.id,
+    presentationId: row.presentation_id,
+    title: row.title,
+    status: row.status as ThreadRow["status"],
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    messageCount: Number(row.message_count ?? 0),
+  };
+}
+
+function toThreadSummary(row: ThreadRow): ThreadSummary {
+  return {
+    threadId: row.id,
+    deckId: row.presentationId,
+    title: row.title,
+    status: row.status,
+    messageCount: row.messageCount,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
 function mapVersion(row: DbVersion): VersionRow {
   return {
     uid: row.uid,
@@ -957,6 +1063,16 @@ type DbVersion = {
   graph_path: string;
   created_by_plan_id: string | null;
   created_at: string;
+};
+
+type DbThread = {
+  id: string;
+  presentation_id: string;
+  title: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  message_count?: number;
 };
 
 type DbArtifact = {

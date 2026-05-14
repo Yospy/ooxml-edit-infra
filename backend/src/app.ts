@@ -1,7 +1,7 @@
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import Fastify, { type FastifyInstance } from "fastify";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { ArtifactStore } from "./artifact-store.js";
 import { loadConfig, type AppConfig } from "./config.js";
@@ -62,6 +62,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   app.get("/health", async () => ({ ok: true }));
 
+  app.get("/api/workspace/current", async () => {
+    return workflow.getCurrentWorkspace();
+  });
+
   app.post("/api/decks/upload", async (request) => {
     let fileName: string;
     let bytes: Buffer;
@@ -86,10 +90,21 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return workflow.getDeckStatus(request.params.deckId);
   });
 
+  app.get<{ Params: { deckId: string } }>("/api/decks/:deckId/threads", async (request) => {
+    return workflow.listThreads(request.params.deckId);
+  });
+
+  app.post<{ Params: { deckId: string } }>("/api/decks/:deckId/threads", async (request) => {
+    return workflow.createThread(request.params.deckId);
+  });
+
   app.get<{ Params: { artifactId: string } }>("/api/artifacts/:artifactId", async (request, reply) => {
     const artifact = repo.getArtifact(request.params.artifactId);
     if (!artifact) throw badRequest("ARTIFACT_NOT_FOUND", "Artifact not found.");
     reply.type(artifact.contentType);
+    if (artifact.contentType.includes("image/svg+xml")) {
+      return reply.send(stripBackendRenderDebug(readFileSync(artifact.path, "utf8")));
+    }
     if (artifact.type === "export") {
       reply.header("content-disposition", `attachment; filename="${basename(artifact.path)}"`);
     }
@@ -150,4 +165,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   );
 
   return app;
+}
+
+function stripBackendRenderDebug(svg: string): string {
+  return svg.replace(
+    /\n\s*<line[^>]*stroke="#e5e7eb"[^>]*>\s*\n\s*<text[^>]*>Backend SVG render · [^<]*<\/text>/,
+    "",
+  );
 }

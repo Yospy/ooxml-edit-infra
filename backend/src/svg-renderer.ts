@@ -4,6 +4,9 @@ import { escapeHtml } from "./xml.js";
 
 const WIDTH = 960;
 const HEIGHT = 540;
+type SlideRenderOptions = {
+  highlightElementIds?: string[];
+};
 
 export function renderGraphSlides(input: {
   graph: CanonicalGraph;
@@ -48,9 +51,15 @@ export function renderGraphSlides(input: {
   return artifacts;
 }
 
-function slideToSvg(slide: GraphSlide, width: number, height: number): string {
+export function slideToSvg(
+  slide: GraphSlide,
+  width = WIDTH,
+  height = HEIGHT,
+  options: SlideRenderOptions = {},
+): string {
   const scaleX = width / slide.widthEmu;
   const scaleY = height / slide.heightEmu;
+  const highlighted = new Set(options.highlightElementIds ?? []);
   const elements = slide.elements
     .map((element) => {
       const x = Math.max(24, element.bounds.x * scaleX);
@@ -58,7 +67,10 @@ function slideToSvg(slide: GraphSlide, width: number, height: number): string {
       const fontSize = element.role === "title" ? 34 : 18;
       const weight = element.role === "title" ? 700 : 400;
       const maxWidth = Math.max(160, element.bounds.w * scaleX);
-      return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" font-family="Arial, sans-serif" font-size="${fontSize}" font-weight="${weight}" fill="#111827">${escapeHtml(truncate(element.text, maxWidth, fontSize))}</text>`;
+      const highlight = highlighted.has(element.elementId)
+        ? `<rect x="${(x - 8).toFixed(1)}" y="${(y - fontSize - 8).toFixed(1)}" width="${(maxWidth + 16).toFixed(1)}" height="${(fontSize + 18).toFixed(1)}" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>`
+        : "";
+      return `${highlight}<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" font-family="Arial, sans-serif" font-size="${fontSize}" font-weight="${weight}" fill="#111827">${escapeHtml(truncate(element.text, maxWidth, fontSize))}</text>`;
     })
     .join("\n");
 
@@ -67,8 +79,6 @@ function slideToSvg(slide: GraphSlide, width: number, height: number): string {
   <rect width="${width}" height="${height}" fill="#ffffff"/>
   <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="10" fill="none" stroke="#d1d5db"/>
   ${elements}
-  <line x1="48" y1="${height - 84}" x2="${width - 48}" y2="${height - 84}" stroke="#e5e7eb" stroke-width="2"/>
-  <text x="48" y="${height - 48}" font-family="Arial, sans-serif" font-size="13" fill="#6b7280">Backend SVG render · ${escapeHtml(slide.slideId)}</text>
 </svg>`;
 }
 

@@ -20,8 +20,10 @@ import type {
   ExportArtifact,
   JobStatus,
   ProcessingProgress,
+  ProposalPreview,
   RequestEditInput,
   ReviewResult,
+  ThreadSummary,
   ToolChip,
 } from "./types.js";
 import {
@@ -31,7 +33,7 @@ import {
   type SlideElementRecord,
   type StoredDecision,
 } from "./repository.js";
-import { renderGraphSlides } from "./svg-renderer.js";
+import { renderGraphSlides, slideToSvg } from "./svg-renderer.js";
 import { validateVersion } from "./validator.js";
 
 type WorkflowOptions = {
@@ -124,6 +126,24 @@ export class WorkflowService {
     return this.options.repo.deckStatus(deckId);
   }
 
+  getCurrentWorkspace(): { deckStatus: DeckStatus | null } {
+    const latest = this.options.repo.getLatestPresentation();
+    return { deckStatus: latest ? this.getDeckStatus(latest.id) : null };
+  }
+
+  listThreads(deckId: string): { threads: ThreadSummary[] } {
+    this.getDeckStatus(deckId);
+    return { threads: this.options.repo.listThreads(deckId) };
+  }
+
+  createThread(deckId: string): { thread: ThreadSummary } {
+    this.getDeckStatus(deckId);
+    const nextNumber = this.options.repo.listThreads(deckId).length + 1;
+    return {
+      thread: this.options.repo.createThread(deckId, `Thread ${nextNumber}`),
+    };
+  }
+
   getJobStatus(jobId: string): JobStatus {
     const job = this.options.repo.getJob(jobId);
     if (!job) throw notFound("JOB_NOT_FOUND", "Job not found.");
@@ -135,13 +155,17 @@ export class WorkflowService {
     events: AgentEvent[];
     editPlan: EditPlan;
     decisionRequest: DecisionRequest;
+    proposalPreview: ProposalPreview;
+    threadId: string;
   }> {
     const deck = this.getDeckStatus(input.deckId);
     if (deck.activeVersionId !== input.versionId) {
       throw conflict("STALE_VERSION", "The deck changed. Replan from the active version.");
     }
 
-    const threadId = this.options.repo.ensureThread(input.deckId);
+    const threadId = input.threadId
+      ? this.requireRequestThread(input.deckId, input.threadId)
+      : this.options.repo.ensureThread(input.deckId);
     this.options.repo.saveThreadMessage(threadId, "user", input.message);
 
     const target = this.resolveTarget(input);
@@ -161,6 +185,7 @@ export class WorkflowService {
       createdFromVersionId: input.versionId,
       status: "awaiting_approval",
     };
+    assertSelectedSlideScope(plan, target.slideId, input.message);
     this.options.repo.savePlan({ ...plan, threadId, userPrompt: input.message });
 
     const decision = this.createDecision({
@@ -191,12 +216,21 @@ export class WorkflowService {
       ],
       defaultOptionId: "apply",
     });
+    const proposalPreview = this.createProposalPreview(
+      input.deckId,
+      input.versionId,
+      plan,
+      decision.decisionId,
+    );
+    this.options.repo.saveThreadMessage(threadId, "assistant", plan.summary);
 
     return {
       uiState: "awaiting_plan_approval",
       events: createPlanEvents(input.message, target, input.versionId, plan, decision),
       editPlan: plan,
       decisionRequest: stripDecision(decision),
+      proposalPreview,
+      threadId,
     };
   }
 
@@ -299,6 +333,7 @@ export class WorkflowService {
 
     if (response.selectedOptionId !== "apply") {
       this.options.repo.updatePlanStatus(plan.planId, "rejected");
+      this.saveDecisionAssistantMessage(decision, "Rejected the pending edit preview.");
       return {
         uiState: "ready" as const,
         events: rejectPlanEvents(decision.decisionId),
@@ -308,6 +343,10 @@ export class WorkflowService {
 
     this.options.repo.updatePlanStatus(plan.planId, "approved");
     const reviewResult = this.applyPlan(deck.deckId, plan, decision.decisionId);
+    this.saveDecisionAssistantMessage(
+      decision,
+      `Applied ${plan.planId} and created ${reviewResult.outputVersionId}.`,
+    );
     const jobId = this.saveSucceededJob({
       deckId: deck.deckId,
       versionId: reviewResult.outputVersionId,
@@ -334,6 +373,10 @@ export class WorkflowService {
   ) {
     if (response.selectedOptionId === "refine") {
       this.options.repo.saveDecision({ ...decision, status: "answered" });
+      this.saveDecisionAssistantMessage(
+        decision,
+        `Kept ${deck.activeVersionId} active for further refinement.`,
+      );
       return {
         uiState: "ready" as const,
         events: refineVersionEvents(decision.decisionId),
@@ -346,6 +389,10 @@ export class WorkflowService {
       const restoreVersion = deck.parentVersionId ?? "v1";
       this.options.repo.markVersionStatus(deck.deckId, deck.activeVersionId, "rejected");
       this.options.repo.updatePresentationActiveVersion(deck.deckId, restoreVersion);
+      this.saveDecisionAssistantMessage(
+        decision,
+        `Rejected ${deck.activeVersionId} and restored ${restoreVersion}.`,
+      );
       return {
         uiState: "ready" as const,
         events: rejectVersionEvents(decision.decisionId),
@@ -361,6 +408,7 @@ export class WorkflowService {
     this.captureFinalReviewDecision(deck, decision, "accepted");
     this.options.repo.saveDecision({ ...decision, status: "answered" });
     this.options.repo.markVersionStatus(deck.deckId, deck.activeVersionId, "accepted");
+    this.saveDecisionAssistantMessage(decision, `Accepted ${deck.activeVersionId}.`);
     return {
       uiState: "accepted" as const,
       events: acceptVersionEvents(decision.decisionId, deck.activeVersionId),
@@ -516,6 +564,63 @@ export class WorkflowService {
     return artifact ? `/api/artifacts/${artifact.id}` : undefined;
   }
 
+  private createProposalPreview(
+    deckId: string,
+    versionId: string,
+    plan: EditPlan,
+    decisionId: string,
+  ): ProposalPreview {
+    const graph = this.readGraph(deckId, versionId);
+    const previewGraph = cloneGraph(graph);
+    for (const op of plan.operations) {
+      if (op.operationType !== "replace_text") continue;
+      const [slideId, elementId] = op.targetRef.split(".");
+      const slide = previewGraph.slides.find((candidate) => candidate.slideId === slideId);
+      const element = slide?.elements.find((candidate) => candidate.elementId === elementId);
+      if (element) element.text = op.after;
+    }
+
+    const slideId = plan.affectedSlides[0] ?? targetSlideFromPlan(plan) ?? previewGraph.slides[0]?.slideId;
+    if (!slideId) throw conflict("PREVIEW_TARGET_NOT_FOUND", "No slide was available for preview.");
+    const slide = previewGraph.slides.find((candidate) => candidate.slideId === slideId);
+    if (!slide) throw conflict("PREVIEW_TARGET_NOT_FOUND", "Preview slide was not found.");
+    const highlightElementIds = plan.operations
+      .filter((operation) => operation.operationType === "replace_text")
+      .map((operation) => operation.targetRef.split("."))
+      .filter(([operationSlideId]) => operationSlideId === slideId)
+      .map(([, elementId]) => elementId)
+      .filter((elementId): elementId is string => Boolean(elementId));
+
+    const previewPath = this.options.store.proposalPreviewPath(
+      deckId,
+      versionId,
+      plan.planId,
+      slideId,
+    );
+    this.options.store.writeText(
+      previewPath,
+      slideToSvg(slide, undefined, undefined, { highlightElementIds }),
+    );
+    const artifact = this.options.repo.saveArtifact({
+      presentationId: deckId,
+      versionId,
+      type: "proposal_preview",
+      path: previewPath,
+      contentType: "image/svg+xml; charset=utf-8",
+      slideId,
+    });
+    const targetRefs = [...new Set(plan.operations.map((operation) => operation.targetRef))];
+    return {
+      planId: plan.planId,
+      decisionId,
+      slideId,
+      versionId,
+      renderUrl: `/api/artifacts/${artifact.id}`,
+      targetRefs,
+      operations: plan.operations,
+    };
+  }
+
   private resolveTarget(input: RequestEditInput): SlideElementRecord {
     const slideId = input.selectedSlideId;
     const selected = input.selectedElementIds?.[0];
@@ -539,11 +644,15 @@ export class WorkflowService {
   }
 
   private requireGraphSlide(deckId: string, versionId: string, slideId: string): GraphSlide {
-    const version = this.options.repo.requireVersion(deckId, versionId);
-    const graph = JSON.parse(readFileSync(version.graphPath, "utf8")) as CanonicalGraph;
+    const graph = this.readGraph(deckId, versionId);
     const slide = graph.slides.find((candidate) => candidate.slideId === slideId);
     if (!slide) throw notFound("SLIDE_NOT_FOUND", "Slide not found.");
     return slide;
+  }
+
+  private readGraph(deckId: string, versionId: string): CanonicalGraph {
+    const version = this.options.repo.requireVersion(deckId, versionId);
+    return JSON.parse(readFileSync(version.graphPath, "utf8")) as CanonicalGraph;
   }
 
   private createDecision(
@@ -558,6 +667,22 @@ export class WorkflowService {
     };
     this.options.repo.saveDecision(decision);
     return decision;
+  }
+
+  private requireRequestThread(deckId: string, threadId: string): string {
+    const thread = this.options.repo.getThread(threadId);
+    if (!thread || thread.presentationId !== deckId) {
+      throw notFound("THREAD_NOT_FOUND", "Thread not found for this deck.");
+    }
+    if (thread.status !== "active") {
+      throw conflict("THREAD_INACTIVE", "Only active threads can receive edit requests.");
+    }
+    return thread.id;
+  }
+
+  private saveDecisionAssistantMessage(decision: StoredDecision, content: string): void {
+    if (!decision.threadId) return;
+    this.options.repo.saveThreadMessage(decision.threadId, "assistant", content);
   }
 
   private saveSucceededJob(input: {
@@ -688,6 +813,45 @@ function normalizeFileName(fileName: string): string {
   return cleaned.toLowerCase().endsWith(".pptx") ? cleaned : `${cleaned}.pptx`;
 }
 
+function assertSelectedSlideScope(
+  plan: EditPlan,
+  selectedSlideId: string,
+  message: string,
+): void {
+  if (allowsMultiSlideRequest(message)) return;
+  const affectedSlides = new Set([
+    ...plan.affectedSlides,
+    ...plan.operations
+      .map((operation) => targetSlideFromRef(operation.targetRef))
+      .filter((slideId): slideId is string => Boolean(slideId)),
+  ]);
+  const unexpected = [...affectedSlides].filter((slideId) => slideId !== selectedSlideId);
+  if (unexpected.length) {
+    throw conflict(
+      "SLIDE_SCOPE_MISMATCH",
+      `The edit plan targeted ${unexpected.join(", ")} but the selected slide is ${selectedSlideId}.`,
+    );
+  }
+}
+
+function allowsMultiSlideRequest(message: string): boolean {
+  return /\b(all|every|entire|whole|deck|presentation|multiple|slides)\b/i.test(message);
+}
+
+function targetSlideFromPlan(plan: EditPlan): string | undefined {
+  return plan.operations
+    .map((operation) => targetSlideFromRef(operation.targetRef))
+    .find((slideId): slideId is string => Boolean(slideId));
+}
+
+function targetSlideFromRef(targetRef: string): string | undefined {
+  return targetRef.split(".")[0] || undefined;
+}
+
+function cloneGraph(graph: CanonicalGraph): CanonicalGraph {
+  return JSON.parse(JSON.stringify(graph)) as CanonicalGraph;
+}
+
 function publicJob(job: JobStatus): JobStatus {
   return {
     jobId: job.jobId,
@@ -719,6 +883,7 @@ function createPlanEvents(
   decision: StoredDecision,
 ): AgentEvent[] {
   const targetRef = `${target.slideId}.${target.elementId}`;
+  const proseId = makeId("prose");
   const replacement = plan.operations.find((op) => op.operationType === "replace_text");
   const resolveChip: ToolChip = {
     chipId: makeId("chip"),
@@ -767,13 +932,13 @@ function createPlanEvents(
   };
   return [
     { type: "user_message", itemId: makeId("user"), text: message },
-    { type: "prose_start", itemId: "prose_plan_intro" },
+    { type: "prose_start", itemId: proseId },
     {
       type: "prose_chunk",
-      itemId: "prose_plan_intro",
+      itemId: proseId,
       delta: "I found the editable text target and prepared a version-bound plan.",
     },
-    { type: "prose_end", itemId: "prose_plan_intro" },
+    { type: "prose_end", itemId: proseId },
     { type: "tool_start", chip: resolveChip },
     { type: "tool_start", chip: planChip },
     { type: "tool_start", chip: applyChip },

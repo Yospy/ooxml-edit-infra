@@ -4,9 +4,11 @@ import type {
   DeckStatus,
   ExportArtifact,
   JobStatus,
+  ProposalPreview,
   ProcessingProgress,
   RequestEditInput,
   ReviewResult,
+  ThreadSummary,
   UiState,
 } from "@/lib/deck-types";
 
@@ -36,9 +38,11 @@ export type UploadDeckResponse = {
 
 export type EditRequestResponse = {
   uiState: "awaiting_plan_approval";
+  threadId: string;
   events: AgentEvent[];
   editPlan: unknown;
   decisionRequest: DecisionRequest;
+  proposalPreview: ProposalPreview;
 };
 
 export type DecisionResponsePayload = {
@@ -67,6 +71,18 @@ export type ExportVersionResponse = {
   uiState: UiState;
   exportArtifact: ExportArtifact;
   deckStatus: DeckStatus;
+};
+
+export type CurrentWorkspaceResponse = {
+  deckStatus: DeckStatus | null;
+};
+
+export type ThreadListResponse = {
+  threads: ThreadSummary[];
+};
+
+export type CreateThreadResponse = {
+  thread: ThreadSummary;
 };
 
 export class BackendError extends Error {
@@ -125,6 +141,22 @@ export async function getDeckStatus(deckId: string): Promise<DeckStatus> {
   return requestJson<DeckStatus>(`/api/decks/${deckId}/status`);
 }
 
+export async function getCurrentWorkspace(): Promise<CurrentWorkspaceResponse> {
+  return requestJson<CurrentWorkspaceResponse>("/api/workspace/current");
+}
+
+export async function listThreads(deckId: string): Promise<ThreadListResponse> {
+  return requestJson<ThreadListResponse>(`/api/decks/${deckId}/threads`);
+}
+
+export async function createThread(deckId: string): Promise<CreateThreadResponse> {
+  return requestJson<CreateThreadResponse>(`/api/decks/${deckId}/threads`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+}
+
 export async function requestEdit(
   input: RequestEditInput,
 ): Promise<EditRequestResponse> {
@@ -135,8 +167,10 @@ export async function requestEdit(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         versionId: input.versionId,
+        threadId: input.threadId,
         message: input.message,
         selectedSlideId: input.slideId,
+        selectedSlideContext: input.selectedSlideContext,
         selectedElementIds: input.selectedElementIds,
         uiMode: "ready",
         clientContext: {

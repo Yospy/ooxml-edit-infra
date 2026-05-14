@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildApp } from "../src/app.js";
@@ -80,7 +81,7 @@ test("upload stores a real PPTX, parses slides, and serves backend render artifa
   });
   assert.equal(render.statusCode, 200);
   assert.match(render.headers["content-type"] as string, /image\/svg\+xml/);
-  assert.match(render.body, /Backend SVG render/);
+  assert.doesNotMatch(render.body, /Backend SVG render/);
 });
 
 test("sample upload fallback creates a deck for the UI skip action", async (t) => {
@@ -157,6 +158,118 @@ test("deck metadata persists across app instances", async (t) => {
   });
   assert.equal(status.statusCode, 200, status.body);
   assert.equal((status.json() as DeckStatus).activeVersionId, "v1");
+
+  const current = await app.inject({
+    method: "GET",
+    url: "/api/workspace/current",
+  });
+  assert.equal(current.statusCode, 200, current.body);
+  assert.equal(
+    (current.json() as { deckStatus: DeckStatus | null }).deckStatus?.deckId,
+    deckId,
+  );
+});
+
+test("deck threads persist metadata and explicit edit messages", async (t) => {
+  const { app, dataDir, deckId, deck } = await createReadyDeck();
+  t.after(async () => {
+    await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(`${dataDir}-root-data`, { recursive: true, force: true });
+  });
+
+  const created = await app.inject({
+    method: "POST",
+    url: `/api/decks/${deckId}/threads`,
+    payload: {},
+  });
+  assert.equal(created.statusCode, 200, created.body);
+  const createdThread = created.json() as {
+    thread: {
+      threadId: string;
+      deckId: string;
+      title: string;
+      messageCount: number;
+      updatedAt: string;
+    };
+  };
+  assert.equal(createdThread.thread.deckId, deckId);
+  assert.equal(createdThread.thread.messageCount, 0);
+
+  await delay(5);
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/decks/${deckId}/edit-requests`,
+    payload: {
+      versionId: deck.activeVersionId,
+      threadId: createdThread.thread.threadId,
+      message: "Make the title shorter",
+      selectedSlideId: "slide_1",
+      selectedElementIds: [],
+    },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(
+    (response.json() as { threadId: string }).threadId,
+    createdThread.thread.threadId,
+  );
+
+  const listed = await app.inject({
+    method: "GET",
+    url: `/api/decks/${deckId}/threads`,
+  });
+  assert.equal(listed.statusCode, 200, listed.body);
+  const threads = (listed.json() as {
+    threads: Array<{ threadId: string; messageCount: number; updatedAt: string }>;
+  }).threads;
+  const updated = threads.find(
+    (thread) => thread.threadId === createdThread.thread.threadId,
+  );
+  assert.ok(updated);
+  assert.equal(updated.messageCount, 2);
+  assert.notEqual(updated.updatedAt, createdThread.thread.updatedAt);
+});
+
+test("edit requests reject thread ids from another deck", async (t) => {
+  const { app, dataDir, deckId, deck } = await createReadyDeck();
+  t.after(async () => {
+    await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(`${dataDir}-root-data`, { recursive: true, force: true });
+  });
+
+  const threadResponse = await app.inject({
+    method: "POST",
+    url: `/api/decks/${deckId}/threads`,
+    payload: {},
+  });
+  assert.equal(threadResponse.statusCode, 200, threadResponse.body);
+  const foreignThreadId = (threadResponse.json() as {
+    thread: { threadId: string };
+  }).thread.threadId;
+
+  const secondUpload = await app.inject({
+    method: "POST",
+    url: "/api/decks/upload",
+    ...multipartPayload("sample.pptx", readFileSync(samplePath)),
+  });
+  assert.equal(secondUpload.statusCode, 200, secondUpload.body);
+  const secondDeckId = (secondUpload.json() as { deckId: string }).deckId;
+
+  const rejected = await app.inject({
+    method: "POST",
+    url: `/api/decks/${secondDeckId}/edit-requests`,
+    payload: {
+      versionId: deck.activeVersionId,
+      threadId: foreignThreadId,
+      message: "Make the title shorter",
+      selectedSlideId: "slide_1",
+      selectedElementIds: [],
+    },
+  });
+  assert.equal(rejected.statusCode, 404, rejected.body);
+  assert.equal(rejected.json().error.code, "THREAD_NOT_FOUND");
 });
 
 test("accept is blocked before backend validation allows it", async (t) => {
@@ -198,17 +311,72 @@ test("edit request creates plan and approval decision without mutating deck", as
 
   assert.equal(response.statusCode, 200, response.body);
   const body = response.json() as {
-    editPlan: { status: string };
+    editPlan: { status: string; affectedSlides: string[] };
     decisionRequest: { inputMode: string };
+    proposalPreview: {
+      slideId: string;
+      renderUrl?: string;
+      targetRefs: string[];
+    };
   };
   assert.equal(body.editPlan.status, "awaiting_approval");
+  assert.deepEqual(body.editPlan.affectedSlides, ["slide_1"]);
   assert.equal(body.decisionRequest.inputMode, "yes_no");
+  assert.equal(body.proposalPreview.slideId, "slide_1");
+  assert.ok(body.proposalPreview.renderUrl);
+  assert.ok(body.proposalPreview.targetRefs.every((targetRef) => targetRef.startsWith("slide_1.")));
 
   const after = await app.inject({
     method: "GET",
     url: `/api/decks/${deckId}/status`,
   });
   assert.equal((after.json() as DeckStatus).activeVersionId, "v1");
+  assert.equal((after.json() as DeckStatus).versions.length, deck.versions.length);
+});
+
+test("edit request targets slide 2 when slide 2 is selected", async (t) => {
+  const { app, dataDir, deckId, deck } = await createReadyDeck();
+  t.after(async () => {
+    await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(`${dataDir}-root-data`, { recursive: true, force: true });
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/decks/${deckId}/edit-requests`,
+    payload: {
+      versionId: deck.activeVersionId,
+      message: "Make the title shorter",
+      selectedSlideId: "slide_2",
+      selectedSlideContext: {
+        slideId: "slide_2",
+        number: 2,
+        title: "Slide Two",
+        subtitle: "Edit me to verify the comparison",
+        activeVersionId: deck.activeVersionId,
+      },
+      selectedElementIds: [],
+    },
+  });
+
+  assert.equal(response.statusCode, 200, response.body);
+  const body = response.json() as {
+    editPlan: { affectedSlides: string[] };
+    proposalPreview: {
+      slideId: string;
+      renderUrl?: string;
+      operations: Array<{ targetRef: string }>;
+    };
+  };
+  assert.deepEqual(body.editPlan.affectedSlides, ["slide_2"]);
+  assert.equal(body.proposalPreview.slideId, "slide_2");
+  assert.ok(body.proposalPreview.renderUrl);
+  assert.ok(
+    body.proposalPreview.operations.every((operation) =>
+      operation.targetRef.startsWith("slide_2."),
+    ),
+  );
 });
 
 test("rejecting plan decision preserves active version", async (t) => {
