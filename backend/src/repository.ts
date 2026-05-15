@@ -9,6 +9,7 @@ import type {
   JobStatus,
   ProcessingProgress,
   Slide,
+  SlideElement,
   SlideStatus,
   ThreadSummary,
   ValidationSummary,
@@ -461,6 +462,9 @@ export class SQLiteRepository {
       title: row.title,
       subtitle: row.subtitle,
       status: row.status as SlideStatus,
+      widthEmu: row.width_emu,
+      heightEmu: row.height_emu,
+      elements: [],
     }));
   }
 
@@ -788,6 +792,11 @@ export class SQLiteRepository {
   deckStatus(presentationId: string): DeckStatus {
     const presentation = this.requirePresentation(presentationId);
     const slides = this.listSlides(presentationId, presentation.activeVersionId).map((slide) => {
+      const elements = this.listElements(
+        presentationId,
+        presentation.activeVersionId,
+        slide.slideId,
+      ).map(toPublicSlideElement);
       const render = this.findArtifact({
         presentationId,
         versionId: presentation.activeVersionId,
@@ -802,6 +811,7 @@ export class SQLiteRepository {
       });
       return {
         ...slide,
+        elements,
         renderUrl: render ? `/api/artifacts/${render.id}` : undefined,
         thumbnailUrl: thumb ? `/api/artifacts/${thumb.id}` : undefined,
       };
@@ -856,6 +866,25 @@ export class SQLiteRepository {
         now(),
       );
   }
+}
+
+function toPublicSlideElement(element: SlideElementRecord): SlideElement {
+  return {
+    elementId: element.elementId,
+    targetRef: `${element.slideId}.${element.elementId}`,
+    elementType: element.elementType,
+    role: element.role,
+    label: labelForElement(element),
+    text: element.text,
+    bounds: element.bounds,
+  };
+}
+
+function labelForElement(element: SlideElementRecord): string {
+  const role = element.role.replace(/[_-]+/g, " ").trim();
+  const title = role ? role[0]!.toUpperCase() + role.slice(1) : "Element";
+  const preview = element.text.length > 42 ? `${element.text.slice(0, 39)}...` : element.text;
+  return preview ? `${title}: ${preview}` : title;
 }
 
 function now(): string {
@@ -1093,6 +1122,8 @@ type DbSlide = {
   title: string;
   subtitle: string;
   status: string;
+  width_emu: number;
+  height_emu: number;
 };
 
 type DbElement = {

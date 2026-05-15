@@ -20,12 +20,32 @@ export type ValidationSummary = {
   warnings: string[];
 };
 
+export type BoundsEmu = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
+export type SlideElement = {
+  elementId: string;
+  targetRef: string;
+  elementType: string;
+  role: string;
+  label: string;
+  text: string;
+  bounds: BoundsEmu;
+};
+
 export type Slide = {
   slideId: string;
   number: number;
   title: string;
   subtitle: string;
   status: SlideStatus;
+  widthEmu: number;
+  heightEmu: number;
+  elements: SlideElement[];
   thumbnailUrl?: string;
   renderUrl?: string;
 };

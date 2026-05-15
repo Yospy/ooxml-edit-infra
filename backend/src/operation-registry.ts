@@ -73,6 +73,7 @@ export class OpenAIOperationSelector implements OperationSelector {
     const allowedOperationTypes = [
       ...new Set(input.menu.targets.flatMap((target) => target.allowedOperations.map((operation) => operation.operationType))),
     ];
+    const selectedTargets = selectedMenuTargets(input.menu, input.selectedElementIds ?? []);
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -92,6 +93,7 @@ export class OpenAIOperationSelector implements OperationSelector {
             content: JSON.stringify({
               user_request: input.message,
               selected_element_ids: input.selectedElementIds ?? [],
+              selected_targets: selectedTargets,
               operation_menu: input.menu,
               rules: [
                 "Choose only a targetRef from operation_menu.targets.",
@@ -484,6 +486,11 @@ function clarification(reason: string): OperationSelection {
 function selectedTextTarget(menu: OperationMenu, selectedElementIds: string[]): OperationMenuTarget | undefined {
   const selected = new Set(selectedElementIds);
   return menu.targets.find((target) => target.elementId && selected.has(target.elementId));
+}
+
+function selectedMenuTargets(menu: OperationMenu, selectedElementIds: string[]): OperationMenuTarget[] {
+  const selected = new Set(selectedElementIds);
+  return menu.targets.filter((target) => target.elementId && selected.has(target.elementId));
 }
 
 function bestExactTextMatch(message: string, targets: OperationMenuTarget[]): OperationMenuTarget | undefined {

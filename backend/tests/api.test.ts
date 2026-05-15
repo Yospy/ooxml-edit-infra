@@ -83,6 +83,24 @@ test("upload stores a real PPTX, parses slides, and serves backend render artifa
   assert.equal(deck.validationSummary.canExport, false);
   assert.ok(deck.slides[0]?.renderUrl);
   assert.ok(deck.slides[0]?.thumbnailUrl);
+  assert.equal(deck.slides[0]?.widthEmu, 9_144_000);
+  assert.equal(deck.slides[0]?.heightEmu, 5_143_500);
+  assert.ok(deck.slides[0]?.elements.length);
+  assert.deepEqual(
+    deck.slides[0]?.elements.map((element) => element.targetRef).sort(),
+    ["slide_1.shape_body", "slide_1.shape_title"],
+  );
+  const titleElement = deck.slides[0]?.elements.find((element) => element.role === "title");
+  assert.deepEqual(
+    deck.slides[0]?.elements.map((element) => element.role).sort(),
+    ["body", "title"],
+  );
+  assert.equal(titleElement?.targetRef, "slide_1.shape_title");
+  assert.equal(titleElement?.elementType, "text_box");
+  assert.equal(titleElement?.bounds.x, 685800);
+  assert.match(titleElement?.label ?? "", /^Title:/);
+  const bodyElement = deck.slides[0]?.elements.find((element) => element.role === "body");
+  assert.equal(bodyElement?.bounds.y, 2743200);
 
   const render = await app.inject({
     method: "GET",
@@ -91,6 +109,11 @@ test("upload stores a real PPTX, parses slides, and serves backend render artifa
   assert.equal(render.statusCode, 200);
   assert.match(render.headers["content-type"] as string, /image\/svg\+xml/);
   assert.doesNotMatch(render.body, /Backend SVG render/);
+  assert.match(render.body, /<text x="72\.0" y="154\.0"[^>]*>Sample Deck<\/text>/);
+  assert.match(
+    render.body,
+    /<text x="72\.0" y="306\.0"[^>]*>Hello from the YC Startup Prospect test fixture<\/text>/,
+  );
 });
 
 test("sample upload fallback creates a deck for the UI skip action", async (t) => {
@@ -503,6 +526,37 @@ test("target resolver honors explicit selected element when prompt is underspeci
     proposalPreview: { targetRefs: string[] };
   };
   assert.deepEqual(body.proposalPreview.targetRefs, ["slide_1.shape_body"]);
+});
+
+test("invalid selected element id does not create an invalid plan", async (t) => {
+  const { app, dataDir, deckId, deck } = await createReadyDeck();
+  t.after(async () => {
+    await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(`${dataDir}-root-data`, { recursive: true, force: true });
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/decks/${deckId}/edit-requests`,
+    payload: {
+      versionId: deck.activeVersionId,
+      message: "Make this better",
+      selectedSlideId: "slide_1",
+      selectedElementIds: ["missing_shape"],
+    },
+  });
+
+  assert.equal(response.statusCode, 200, response.body);
+  const body = response.json() as {
+    uiState: string;
+    proposalPreview?: { targetRefs: string[] };
+    decisionRequest: { purpose: string; inputMode: string };
+  };
+  assert.equal(body.uiState, "ready");
+  assert.equal(body.proposalPreview, undefined);
+  assert.equal(body.decisionRequest.purpose, "choose_target");
+  assert.equal(body.decisionRequest.inputMode, "single_choice");
 });
 
 test("ambiguous target request returns clarification instead of guessing title", async (t) => {

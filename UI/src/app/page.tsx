@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   AlertTriangle,
   ArrowDownToLine,
@@ -47,6 +54,7 @@ import type {
   ProposalPreview,
   ReviewResult,
   Slide,
+  SlideElement,
   ThreadSummary,
   ToolChip,
   ToolIcon,
@@ -117,6 +125,7 @@ type StoredWorkspace = {
   reviewResult: ReviewResult | null;
   proposalPreview: ProposalPreview | null;
   compareOpen: boolean;
+  selectedElementId?: string | null;
 };
 
 function readStoredWorkspace(): StoredWorkspace | null {
@@ -400,6 +409,7 @@ export default function Home() {
   const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
   const [proposalPreview, setProposalPreview] = useState<ProposalPreview | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
   const [panel, setPanel] = useState<PanelItem[]>([]);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -415,6 +425,20 @@ export default function Home() {
     () => deck?.slides.find((slide) => slide.slideId === selectedSlideId),
     [deck, selectedSlideId],
   );
+
+  const selectedElement = useMemo(
+    () =>
+      selectedSlide?.elements.find(
+        (element) => element.elementId === selectedElementId,
+      ) ?? null,
+    [selectedElementId, selectedSlide],
+  );
+
+  useEffect(() => {
+    if (selectedElementId && !selectedElement) {
+      setSelectedElementId(null);
+    }
+  }, [selectedElement, selectedElementId]);
 
   const hasBlockingChip = useMemo(
     () =>
@@ -442,6 +466,11 @@ export default function Home() {
     mode === "editing" ||
     mode === "validating";
 
+  function handleSelectSlide(slideId: string) {
+    setSelectedSlideId(slideId);
+    setSelectedElementId(null);
+  }
+
   async function handleCreateThread() {
     if (!deck || threadControlsDisabled) return;
     try {
@@ -457,6 +486,7 @@ export default function Home() {
       setActiveThreadId(result.thread.threadId);
       setPanel([]);
       setPrompt("");
+      setSelectedElementId(null);
       setReviewResult(null);
       setProposalPreview(null);
       setCompareOpen(false);
@@ -475,6 +505,7 @@ export default function Home() {
     setActiveThreadId(threadId);
     setPanel(nextPanelByThreadId[threadId] ?? []);
     setPrompt("");
+    setSelectedElementId(null);
     setReviewResult(null);
     setProposalPreview(null);
     setCompareOpen(false);
@@ -531,6 +562,14 @@ export default function Home() {
               : [];
         setDeck(restoredDeck);
         setSelectedSlideId(restoredSlideId);
+        setSelectedElementId(
+          storedMatchesActiveVersion &&
+            restoredDeck.slides
+              .find((slide) => slide.slideId === restoredSlideId)
+              ?.elements.some((element) => element.elementId === stored?.selectedElementId)
+            ? (stored?.selectedElementId ?? null)
+            : null,
+        );
         setThreads(restoredThreads);
         setActiveThreadId(restoredThreadId);
         setPanelByThreadId(storedPanelByThreadId);
@@ -549,6 +588,7 @@ export default function Home() {
           if (current.deckStatus) {
             setDeck(current.deckStatus);
             setSelectedSlideId(chooseRestoredSlide(current.deckStatus));
+            setSelectedElementId(null);
             const currentThreads = (await listThreads(current.deckStatus.deckId)).threads;
             if (cancelled) return;
             setThreads(currentThreads);
@@ -585,6 +625,7 @@ export default function Home() {
       deckId: deck.deckId,
       activeVersionId: deck.activeVersionId,
       selectedSlideId,
+      selectedElementId,
       mode,
       panel,
       activeThreadId,
@@ -605,6 +646,7 @@ export default function Home() {
     proposalPreview,
     reviewResult,
     selectedSlideId,
+    selectedElementId,
     sessionHydrated,
   ]);
 
@@ -620,6 +662,7 @@ export default function Home() {
       setReviewResult(null);
       setProposalPreview(null);
       setCompareOpen(false);
+      setSelectedElementId(null);
       setThreads([]);
       setActiveThreadId(null);
       setPanelByThreadId({});
@@ -640,6 +683,7 @@ export default function Home() {
       setThreads(readyThreads);
       setActiveThreadId(readyThreads[0]?.threadId ?? null);
       setSelectedSlideId(chooseRestoredSlide(readyDeck));
+      setSelectedElementId(null);
       setMode("ready");
     } catch (error) {
       console.error(error);
@@ -689,7 +733,7 @@ export default function Home() {
               activeVersionId: deck.activeVersionId,
             }
           : undefined,
-        selectedElementIds: [],
+        selectedElementIds: selectedElement ? [selectedElement.elementId] : [],
         visibleSlideIds: deck.slides.map((slide) => slide.slideId),
         message,
       });
@@ -757,6 +801,7 @@ export default function Home() {
         setMode(result.uiState);
         const job = await pollJob<ApplyJobResult>(result.jobId);
         if (job.result?.deckStatus) setDeck(job.result.deckStatus);
+        setSelectedElementId(null);
         if (job.result?.reviewResult) {
           setReviewResult(job.result.reviewResult);
           setMode("review_ready");
@@ -774,15 +819,18 @@ export default function Home() {
       if (result.deckStatus) setDeck(result.deckStatus);
       if (response.verb === "apply_plan" && response.selectedId !== "apply") {
         setPrompt("");
+        setSelectedElementId(null);
         setProposalPreview(null);
         setCompareOpen(false);
       }
       if (response.verb === "accept_version" && response.selectedId === "reject") {
+        setSelectedElementId(null);
         setExported(false);
         setReviewResult(null);
         setCompareOpen(false);
       }
       if (response.verb === "accept_version" && response.selectedId === "refine") {
+        setSelectedElementId(null);
         setExported(false);
         setReviewResult(null);
         setCompareOpen(false);
@@ -854,7 +902,7 @@ export default function Home() {
             <SlideRail
               deck={deck}
               selectedSlideId={selectedSlideId}
-              onSelect={setSelectedSlideId}
+              onSelect={handleSelectSlide}
             />
             <RenderCanvas
               mode={mode}
@@ -862,6 +910,8 @@ export default function Home() {
               activeVersionId={deck?.activeVersionId ?? "v1"}
               reviewResult={reviewResult}
               proposalPreview={proposalPreview}
+              selectedElementId={selectedElementId}
+              onSelectElement={setSelectedElementId}
               compareOpen={compareOpen}
               onCompareOpenChange={setCompareOpen}
             />
@@ -874,11 +924,13 @@ export default function Home() {
                     activeThreadId={activeThreadId}
                     threadControlsDisabled={threadControlsDisabled}
                     prompt={prompt}
+                    selectedElement={selectedElement}
                     composerEnabled={composerEnabled}
                     composerPlaceholder={composerPlaceholder(mode, hasBlockingChip)}
                     onCreateThread={handleCreateThread}
                     onSelectThread={handleSelectThread}
                     onPromptChange={setPrompt}
+                    onClearSelectedElement={() => setSelectedElementId(null)}
                     onSubmitPrompt={submitPrompt}
                     onChipResponse={onChipResponse}
                     onClose={() => setPanelOpen(false)}
@@ -1227,6 +1279,8 @@ function RenderCanvas({
   activeVersionId,
   reviewResult,
   proposalPreview,
+  selectedElementId,
+  onSelectElement,
   compareOpen,
   onCompareOpenChange,
 }: {
@@ -1235,6 +1289,8 @@ function RenderCanvas({
   activeVersionId: string;
   reviewResult: ReviewResult | null;
   proposalPreview: ProposalPreview | null;
+  selectedElementId: string | null;
+  onSelectElement: (elementId: string | null) => void;
   compareOpen: boolean;
   onCompareOpenChange: (open: boolean) => void;
 }) {
@@ -1360,6 +1416,9 @@ function RenderCanvas({
               version={activeVersionId}
               highlighted={Boolean(activeProposal)}
               changed={Boolean(activeProposal || selectedReviewPreview)}
+              selectedElementId={selectedElementId}
+              selectionEnabled={!activeProposal && !reviewMode}
+              onSelectElement={onSelectElement}
               showCaption={false}
             />
             {activeProposal ? (
@@ -1380,6 +1439,11 @@ function RenderCanvas({
 const MIN_CANVAS_ZOOM = 0.25;
 const MAX_CANVAS_ZOOM = 12;
 const CANVAS_ZOOM_SPEED = 0.004;
+const BASE_RENDER_WIDTH = 960;
+const BASE_RENDER_HEIGHT = 540;
+const TEXT_HIGHLIGHT_WIDTH_FACTOR = 0.48;
+const TEXT_GLYPH_TOP_FACTOR = 0.18;
+const TEXT_GLYPH_HEIGHT_FACTOR = 1;
 
 function SlideRender({
   title,
@@ -1387,6 +1451,9 @@ function SlideRender({
   version,
   highlighted,
   changed,
+  selectedElementId,
+  selectionEnabled = false,
+  onSelectElement,
   showCaption = true,
 }: {
   title: string;
@@ -1394,6 +1461,9 @@ function SlideRender({
   version: string;
   highlighted?: boolean;
   changed?: boolean;
+  selectedElementId?: string | null;
+  selectionEnabled?: boolean;
+  onSelectElement?: (elementId: string | null) => void;
   showCaption?: boolean;
 }) {
   const slideKey = `${slide?.slideId ?? "empty"}:${slide?.renderUrl ?? "fallback"}`;
@@ -1414,6 +1484,9 @@ function SlideRender({
         version={version}
         slide={slide}
         highlighted={highlighted}
+        selectedElementId={selectedElementId}
+        selectionEnabled={selectionEnabled}
+        onSelectElement={onSelectElement}
       />
     </figure>
   );
@@ -1424,11 +1497,17 @@ function InfiniteSlideCanvas({
   version,
   slide,
   highlighted,
+  selectedElementId,
+  selectionEnabled = false,
+  onSelectElement,
 }: {
   title: string;
   version: string;
   slide?: Slide;
   highlighted?: boolean;
+  selectedElementId?: string | null;
+  selectionEnabled?: boolean;
+  onSelectElement?: (elementId: string | null) => void;
 }) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
@@ -1538,10 +1617,11 @@ function InfiniteSlideCanvas({
     >
       <div
         className={cn(
-          "absolute left-0 top-0 aspect-video w-full max-w-none",
+          "absolute left-0 top-0 w-full max-w-none overflow-hidden rounded-sm",
           highlighted && "ring-2 ring-foreground",
         )}
         style={{
+          aspectRatio: slide ? `${slide.widthEmu} / ${slide.heightEmu}` : "16 / 9",
           transform: `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.scale})`,
           transformOrigin: "0 0",
           willChange: "transform",
@@ -1570,9 +1650,162 @@ function InfiniteSlideCanvas({
             </div>
           </div>
         )}
+        {selectionEnabled && slide?.elements.length ? (
+          <ElementSelectionOverlay
+            slide={slide}
+            selectedElementId={selectedElementId ?? null}
+            onSelectElement={onSelectElement}
+          />
+        ) : null}
       </div>
     </div>
   );
+}
+
+function ElementSelectionOverlay({
+  slide,
+  selectedElementId,
+  onSelectElement,
+}: {
+  slide: Slide;
+  selectedElementId: string | null;
+  onSelectElement?: (elementId: string | null) => void;
+}) {
+  const [hoveredElementId, setHoveredElementId] = useState<string | null>(null);
+
+  return (
+    <div className="pointer-events-none absolute inset-0">
+      {slide.elements.map((element) => {
+        const selected = element.elementId === selectedElementId;
+        const hovered = element.elementId === hoveredElementId;
+        return (
+          <div key={element.elementId}>
+            {(selected || hovered) ? (
+              <ElementInlineHighlight
+                element={element}
+                selected={selected}
+                style={elementInlineHighlightStyle(slide, element)}
+              />
+            ) : null}
+            <button
+              type="button"
+              aria-label={`Select ${element.label}`}
+              title={element.label}
+              onPointerEnter={() => setHoveredElementId(element.elementId)}
+              onPointerLeave={() =>
+                setHoveredElementId((current) =>
+                  current === element.elementId ? null : current,
+                )
+              }
+              onFocus={() => setHoveredElementId(element.elementId)}
+              onBlur={() =>
+                setHoveredElementId((current) =>
+                  current === element.elementId ? null : current,
+                )
+              }
+              onPointerDown={(event) => {
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onSelectElement?.(selected ? null : element.elementId);
+              }}
+              className="pointer-events-auto absolute rounded-sm border-0 bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/80"
+              style={elementHitTargetStyle(slide, element)}
+            >
+              <span className="sr-only">{element.label}</span>
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ElementInlineHighlight({
+  element,
+  selected,
+  style,
+}: {
+  element: SlideElement;
+  selected: boolean;
+  style: CSSProperties;
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      className={cn(
+        "absolute rounded-[3px] transition",
+        selected
+          ? "bg-sky-400/18 shadow-[inset_3px_0_0_rgba(2,132,199,0.9),0_0_0_1px_rgba(2,132,199,0.28)]"
+          : "bg-sky-300/10 shadow-[inset_2px_0_0_rgba(2,132,199,0.35)]",
+      )}
+      style={style}
+    >
+      {selected ? (
+        <span className="absolute -left-1 top-1/2 h-[70%] w-1 -translate-y-1/2 rounded-full bg-sky-600 shadow-sm" />
+      ) : null}
+      <span className="sr-only">{element.label}</span>
+    </div>
+  );
+}
+
+function elementHitTargetStyle(
+  slide: Slide,
+  element: SlideElement,
+): CSSProperties {
+  const left = clampRatio(element.bounds.x, slide.widthEmu);
+  const top = clampRatio(element.bounds.y, slide.heightEmu);
+  const right = clampRatio(element.bounds.x + element.bounds.w, slide.widthEmu);
+  const bottom = clampRatio(element.bounds.y + element.bounds.h, slide.heightEmu);
+  return {
+    left: `${left * 100}%`,
+    top: `${top * 100}%`,
+    width: `${Math.max(0, right - left) * 100}%`,
+    height: `${Math.max(0, bottom - top) * 100}%`,
+  };
+}
+
+function elementInlineHighlightStyle(
+  slide: Slide,
+  element: SlideElement,
+): CSSProperties {
+  const rawLeft = clampRatio(element.bounds.x, slide.widthEmu);
+  const rawTop = clampRatio(element.bounds.y, slide.heightEmu);
+  const rawRight = clampRatio(element.bounds.x + element.bounds.w, slide.widthEmu);
+  const rawBottom = clampRatio(element.bounds.y + element.bounds.h, slide.heightEmu);
+  const rawWidth = Math.max(0, rawRight - rawLeft);
+  const rawHeight = Math.max(0, rawBottom - rawTop);
+  const fontSize = element.role.toLowerCase().includes("title") ? 34 : 18;
+  const textWidthRatio = Math.min(
+    rawWidth,
+    Math.max(fontSize, element.text.length * fontSize * TEXT_HIGHLIGHT_WIDTH_FACTOR) /
+      BASE_RENDER_WIDTH,
+  );
+  const textHeightRatio = Math.min(
+    rawHeight,
+    (fontSize * TEXT_GLYPH_HEIGHT_FACTOR) / BASE_RENDER_HEIGHT,
+  );
+  const left = clamp(rawLeft, 0, 1);
+  const top = clamp(rawTop + (fontSize * TEXT_GLYPH_TOP_FACTOR) / BASE_RENDER_HEIGHT, 0, 1);
+  const width = clamp(textWidthRatio, 0, 1 - left);
+  const height = clamp(textHeightRatio, 0, 1 - top);
+  return {
+    left: `${left * 100}%`,
+    top: `${top * 100}%`,
+    width: `${width * 100}%`,
+    height: `${height * 100}%`,
+  };
+}
+
+function clampRatio(value: number, max: number): number {
+  if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) return 0;
+  return Math.min(1, Math.max(0, value / max));
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 // ----- AgentPanel (narration + chips) -----
@@ -1583,11 +1816,13 @@ function AgentPanel({
   activeThreadId,
   threadControlsDisabled,
   prompt,
+  selectedElement,
   composerEnabled,
   composerPlaceholder,
   onCreateThread,
   onSelectThread,
   onPromptChange,
+  onClearSelectedElement,
   onSubmitPrompt,
   onChipResponse,
   onClose,
@@ -1597,11 +1832,13 @@ function AgentPanel({
   activeThreadId: string | null;
   threadControlsDisabled: boolean;
   prompt: string;
+  selectedElement: SlideElement | null;
   composerEnabled: boolean;
   composerPlaceholder: string;
   onCreateThread: () => void;
   onSelectThread: (threadId: string) => void;
   onPromptChange: (value: string) => void;
+  onClearSelectedElement: () => void;
   onSubmitPrompt: () => void;
   onChipResponse: (response: ChipResponse) => void;
   onClose: () => void;
@@ -1692,9 +1929,11 @@ function AgentPanel({
       </div>
       <Composer
         prompt={prompt}
+        selectedElement={selectedElement}
         disabled={!composerEnabled}
         placeholder={composerPlaceholder}
         onPromptChange={onPromptChange}
+        onClearSelectedElement={onClearSelectedElement}
         onSubmitPrompt={onSubmitPrompt}
       />
     </aside>
@@ -2086,19 +2325,47 @@ function ChipFailureControls({
 
 function Composer({
   prompt,
+  selectedElement,
   disabled,
   placeholder,
   onPromptChange,
+  onClearSelectedElement,
   onSubmitPrompt,
 }: {
   prompt: string;
+  selectedElement: SlideElement | null;
   disabled: boolean;
   placeholder: string;
   onPromptChange: (value: string) => void;
+  onClearSelectedElement: () => void;
   onSubmitPrompt: () => void;
 }) {
   return (
     <div className="border-t bg-background p-3">
+      {selectedElement ? (
+        <div className="mb-2 flex items-center gap-2">
+          <Badge variant="secondary" className="max-w-full rounded-md px-2 py-1">
+            <span className="mr-1 text-muted-foreground">@</span>
+            <span className="max-w-[260px] truncate">
+              {selectionTagLabel(selectedElement)}
+            </span>
+          </Badge>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={onClearSelectedElement}
+                aria-label="Clear selected element"
+              >
+                <X className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Clear selection</TooltipContent>
+          </Tooltip>
+        </div>
+      ) : null}
       <div
         className={cn(
           "relative flex items-end rounded-2xl border bg-muted/30 px-3 py-2 shadow-sm transition-opacity",
@@ -2132,6 +2399,11 @@ function Composer({
       </div>
     </div>
   );
+}
+
+function selectionTagLabel(element: SlideElement): string {
+  const role = element.role.replace(/[_-]+/g, " ").trim();
+  return role ? role[0]!.toUpperCase() + role.slice(1) : "Element";
 }
 
 // ----- TrustStrip (unchanged) -----
